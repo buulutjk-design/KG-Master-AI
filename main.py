@@ -6,12 +6,13 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 BOT_TOKEN = "8727632778:AAEbNjZzXfS8GHLIoDtoJHAgKMxL4P6y_go"
 ADMIN_ID = 8480843841
-API_KEY = "2180b95ef16955595f12d9f9cdebcd74"
+API_KEY = "7d7e4508cb4cfe8006ccc9422bb28b1d"  # YENİ KEY
 API_URL = "https://v3.football.api-sports.io"
 
 HOME_NAME, AWAY_NAME = range(2)
 analysis_cache = {}
 CACHE_TIME = 43200
+
 
 def safe_request(url):
     headers = {"x-apisports-key": API_KEY}
@@ -25,6 +26,7 @@ def safe_request(url):
         time.sleep(1)
     return None
 
+
 def search_team_id(team_name):
     r = safe_request(f"{API_URL}/teams?search={team_name}")
     if not r:
@@ -34,6 +36,51 @@ def search_team_id(team_name):
         return None, None
     t = teams[0]["team"]
     return t["id"], t["name"]
+
+
+def calc_weighted_btts(matches):
+    if not matches:
+        return 0
+    total_w, btts_w = 0, 0
+    for i, (gh, ga) in enumerate(matches):
+        w = i + 1
+        total_w += w
+        if gh > 0 and ga > 0:
+            btts_w += w
+    return btts_w / total_w
+
+
+def get_fixtures_by_team(team_id, last=10, venue=None):
+    r = safe_request(f"{API_URL}/fixtures?team={team_id}&last={last}&status=FT")
+    if not r:
+        return []
+    matches = []
+    for m in r.get("response", []):
+        gh = m["goals"]["home"]
+        ga = m["goals"]["away"]
+        if gh is None or ga is None:
+            continue
+        if venue == "home" and m["teams"]["home"]["id"] != team_id:
+            continue
+        if venue == "away" and m["teams"]["away"]["id"] != team_id:
+            continue
+        matches.append((gh, ga))
+    return matches
+
+
+def get_h2h(id1, id2, last=6):
+    r = safe_request(f"{API_URL}/fixtures/headtohead?h2h={id1}-{id2}&last={last}")
+    if not r:
+        return []
+    matches = []
+    for m in r.get("response", []):
+        gh = m["goals"]["home"]
+        ga = m["goals"]["away"]
+        if gh is None or ga is None:
+            continue
+        matches.append((gh, ga))
+    return matches
+
 
 def get_match_analysis(team1, team2):
     key = f"{team1.lower()}_{team2.lower()}"
@@ -47,73 +94,36 @@ def get_match_analysis(team1, team2):
     id2, name2 = search_team_id(team2)
 
     if not id1:
-        return {"error": f"Team not found: {team1}"}
+        return {"error": f"Team not found: '{team1}'"}
     if not id2:
-        return {"error": f"Team not found: {team2}"}
+        return {"error": f"Team not found: '{team2}'"}
 
-    # Free planda çalışan tek endpoint: son maçlar (genel liste)
-    r = safe_request(f"{API_URL}/fixtures?last=50&status=FT")
-    if not r:
-        return {"error": "API connection failed"}
+    home_general = get_fixtures_by_team(id1, last=10)
+    home_at_home = get_fixtures_by_team(id1, last=20, venue="home")[:10]
+    away_general = get_fixtures_by_team(id2, last=10)
+    away_at_away = get_fixtures_by_team(id2, last=20, venue="away")[:10]
+    h2h          = get_h2h(id1, id2, last=6)
 
-    all_matches = r.get("response", [])
+    if not home_general or not away_general:
+        return {"error": "Match data not found"}
 
-    team1_matches = []
-    team2_matches = []
+    s_hg = calc_weighted_btts(home_general)
+    s_hh = calc_weighted_btts(home_at_home) if home_at_home else s_hg
+    s_ag = calc_weighted_btts(away_general)
+    s_aa = calc_weighted_btts(away_at_away) if away_at_away else s_ag
+    s_h2 = calc_weighted_btts(h2h) if h2h else None
 
-    for m in all_matches:
-        home_id = m["teams"]["home"]["id"]
-        away_id = m["teams"]["away"]["id"]
-        gh = m["goals"]["home"]
-        ga = m["goals"]["away"]
-        if gh is None or ga is None:
-            continue
+    weighted = s_hg * 1.0 + s_hh * 1.5 + s_ag * 1.0 + s_aa * 1.5
+    total_w = 5.0
 
-        if home_id == id1 or away_id == id1:
-            team1_matches.append((gh, ga))
-        if home_id == id2 or away_id == id2:
-            team2_matches.append((gh, ga))
+    if s_h2 is not None:
+        weighted += s_h2 * 2.0
+        total_w += 2.0
 
-    # Eğer son 50'de yoksa daha fazla çek
-    if len(team1_matches) < 3 or len(team2_matches) < 3:
-        r2 = safe_request(f"{API_URL}/fixtures?last=200&status=FT")
-        if r2:
-            for m in r2.get("response", []):
-                home_id = m["teams"]["home"]["id"]
-                away_id = m["teams"]["away"]["id"]
-                gh = m["goals"]["home"]
-                ga = m["goals"]["away"]
-                if gh is None or ga is None:
-                    continue
-                if home_id == id1 or away_id == id1:
-                    team1_matches.append((gh, ga))
-                if home_id == id2 or away_id == id2:
-                    team2_matches.append((gh, ga))
+    prob = int((weighted / total_w) * 100)
+    prob = max(0, min(100, prob))
 
-    # Tekrar eden maçları temizle
-    team1_matches = list(dict.fromkeys(team1_matches))[:10]
-    team2_matches = list(dict.fromkeys(team2_matches))[:10]
-
-    if not team1_matches or not team2_matches:
-        return {"error": f"No match data found.\nFound: {name1}({len(team1_matches)}) {name2}({len(team2_matches)})"}
-
-    def btts_rate(matches):
-        if not matches:
-            return 0
-        return sum(1 for gh, ga in matches if gh > 0 and ga > 0) / len(matches)
-
-    rate1 = btts_rate(team1_matches)
-    rate2 = btts_rate(team2_matches)
-    prob = int(((rate1 + rate2) / 2) * 100)
-
-    result = {
-        "h": name1,
-        "a": name2,
-        "p": prob,
-        "m1": len(team1_matches),
-        "m2": len(team2_matches)
-    }
-
+    result = {"h": name1, "a": name2, "p": prob}
     analysis_cache[key] = {"data": result, "time": now}
     return result
 
@@ -125,10 +135,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🏳 Home Team Name:")
     return HOME_NAME
 
+
 async def get_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["t1"] = update.message.text
     await update.message.reply_text("🚩 Away Team Name:")
     return AWAY_NAME
+
 
 async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t1 = context.user_data["t1"]
@@ -177,5 +189,6 @@ def run_bot():
         except Exception as e:
             print("BOT RESTARTING", e)
             time.sleep(5)
+
 
 run_bot()
