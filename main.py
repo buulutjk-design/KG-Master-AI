@@ -1,18 +1,24 @@
 import requests
 import math
+import time
+import logging
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
-BOT_TOKEN = "BOT_TOKEN"
-ADMIN_ID = 000000000
-API_KEY = "API_KEY"
+# BOT SETTINGS
+BOT_TOKEN = "8727632778:AAEbNjZzXfS8GHLIoDtoJHAgKMxL4P6y_go"
+ADMIN_ID = 8480843841
+API_KEY = "2180b95ef16955595f12d9f9cdebcd74"
 API_URL = "https://v3.football.api-sports.io"
 
 HOME_NAME, AWAY_NAME = range(2)
 
+# CACHE
 analysis_cache = {}
 CACHE_TIME = 43200
+
+logging.basicConfig(level=logging.INFO)
 
 
 def poisson_zero(x):
@@ -36,6 +42,8 @@ def safe_request(url):
 
         except:
             pass
+
+        time.sleep(1)
 
     return None
 
@@ -143,6 +151,18 @@ def get_team_stats(team_id):
 
 def get_match_analysis(t1,t2):
 
+    key=f"{t1.lower()}_{t2.lower()}"
+
+    now=datetime.now().timestamp()
+
+    if key in analysis_cache:
+
+        cached=analysis_cache[key]
+
+        if now-cached["time"] < CACHE_TIME:
+
+            return cached["data"]
+
     id1 = get_team_id(t1)
     id2 = get_team_id(t2)
 
@@ -164,9 +184,7 @@ def get_match_analysis(t1,t2):
     poisson = 1 - p_home0 - p_away0 + (p_home0*p_away0)
 
     stat = (s1["btts"] + s2["btts"]) / 2
-
     form = (s1["form"] + s2["form"]) / 2
-
     attack = (s1["attack"] + s2["attack"]) / 4
     defense = (s1["defense"] + s2["defense"]) / 4
 
@@ -180,11 +198,18 @@ def get_match_analysis(t1,t2):
 
     prob=int(final*100)
 
-    return {
+    result={
         "h":t1,
         "a":t2,
         "p":prob
     }
+
+    analysis_cache[key]={
+        "data":result,
+        "time":now
+    }
+
+    return result
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -212,49 +237,21 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t1=context.user_data['t1']
     t2=update.message.text
 
-    key=f"{t1.lower()}_{t2.lower()}"
+    wait=await update.message.reply_text(
+        "🛜 Analysis in progress...\nFetching match data..."
+    )
 
-    now=datetime.now().timestamp()
-
-    if key in analysis_cache:
-
-        cached=analysis_cache[key]
-
-        if now-cached["time"] < CACHE_TIME:
-
-            result=cached["data"]
-
-        else:
-
-            del analysis_cache[key]
-            result=None
-
-    else:
-
-        result=None
+    result=get_match_analysis(t1,t2)
 
     if not result:
 
-        wait=await update.message.reply_text(
-            "🛜 Analysis in progress...\nFetching match data..."
+        await wait.edit_text(
+            "❌ Match not found.\n\nTry official names\nExample:\nBarcelona\nLiverpool\nArsenal"
         )
 
-        result=get_match_analysis(t1,t2)
+        return ConversationHandler.END
 
-        if not result:
-
-            await wait.edit_text(
-                "❌ Match not found.\n\nTips:\nUse official team names\nExample:\nBarcelona\nLiverpool\nArsenal"
-            )
-
-            return ConversationHandler.END
-
-        analysis_cache[key]={
-            "data":result,
-            "time":now
-        }
-
-        await wait.delete()
+    await wait.delete()
 
     prob=result["p"]
 
@@ -274,28 +271,41 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-if __name__ == '__main__':
+def run_bot():
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    while True:
 
-    conv = ConversationHandler(
+        try:
 
-        entry_points=[CommandHandler('start', start)],
+            app = Application.builder().token(BOT_TOKEN).build()
 
-        states={
+            conv = ConversationHandler(
 
-            HOME_NAME:[MessageHandler(filters.TEXT & ~filters.COMMAND, get_home)],
+                entry_points=[CommandHandler('start', start)],
 
-            AWAY_NAME:[MessageHandler(filters.TEXT & ~filters.COMMAND, analyze)],
+                states={
 
-        },
+                    HOME_NAME:[MessageHandler(filters.TEXT & ~filters.COMMAND, get_home)],
 
-        fallbacks=[]
+                    AWAY_NAME:[MessageHandler(filters.TEXT & ~filters.COMMAND, analyze)],
 
-    )
+                },
 
-    app.add_handler(conv)
+                fallbacks=[]
 
-    print("Bot running")
+            )
 
-    app.run_polling()
+            app.add_handler(conv)
+
+            print("Bot running")
+
+            app.run_polling()
+
+        except Exception as e:
+
+            print("Bot crashed restarting in 5 sec", e)
+
+            time.sleep(5)
+
+
+run_bot()
