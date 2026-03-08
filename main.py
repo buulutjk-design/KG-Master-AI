@@ -6,16 +6,16 @@ from telegram.ext import (
     ContextTypes, ConversationHandler
 )
 
-# --- AYARLAR ---
-BOT_TOKEN = "8540157840:AAEU16aFsx1opTfESiGyx0WQN18EjUj75BU"
+# --- GÜNCEL AYARLAR ---
+BOT_TOKEN = "8727632778:AAEbNjZzXfS8GHLIoDtoJHAgKMxL4P6y_go"
 ADMIN_ID = 8480843841
 API_KEY = "2180b95ef16955595f12d9f9cdebcd74"
 API_URL = "https://v3.football.api-sports.io"
 
-# Durumlar
+# Diyalog Durumları
 HOME_NAME, AWAY_NAME = range(2)
 
-# --- NOKTA ATIŞI ANALİZ MOTORU ---
+# --- ANALİZ MOTORU ---
 def get_match_analysis(home_query, away_query):
     headers = {'x-rapidapi-key': API_KEY, 'x-rapidapi-host': 'v3.football.api-sports.io'}
     today = datetime.now().strftime('%Y-%m-%d')
@@ -23,16 +23,15 @@ def get_match_analysis(home_query, away_query):
     
     found_fixture = None
     
-    # Sadece bugün ve yarınki maçlar taranır
+    # Bugün ve yarınki maçlarda takım eşleşmesi ara
     for date in [today, tomorrow]:
         try:
-            # API'den o günkü maç listesini tek seferde çeker
             res = requests.get(f"{API_URL}/fixtures?date={date}", headers=headers).json()
             for f in res.get('response', []):
                 h_name = f['teams']['home']['name'].lower()
                 a_name = f['teams']['away']['name'].lower()
                 
-                # İsim eşleşmesi (Takımları bulursa döngüden çıkar)
+                # Esnek arama: Yazılan kelime takım isminde geçiyor mu?
                 if home_query.lower() in h_name and away_query.lower() in a_name:
                     found_fixture = f
                     break
@@ -41,7 +40,7 @@ def get_match_analysis(home_query, away_query):
 
     if not found_fixture: return None
 
-    # Eşleşen maç için TEK bir analiz isteği atar
+    # Eşleşen maç için tekil analiz (BTTS/KG) verisini çek
     try:
         f_id = found_fixture['fixture']['id']
         p_res = requests.get(f"{API_URL}/predictions?fixture={f_id}", headers=headers).json()
@@ -59,7 +58,7 @@ def get_match_analysis(home_query, away_query):
 
 # --- BOT AKIŞI ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # SADECE ADMİN KULLANABİLİR
+    # Sadece Admin Kullanabilir
     if update.effective_user.id != ADMIN_ID:
         return ConversationHandler.END
     
@@ -78,15 +77,14 @@ async def get_away_and_analyze(update: Update, context: ContextTypes.DEFAULT_TYP
     
     wait_msg = await update.message.reply_text("⏳ Analysing...")
     
-    # Analiz yapılır
     result = get_match_analysis(home_team, away_team)
     
     if not result:
-        await wait_msg.edit_text("❌ Match not found. Check team names.")
+        await wait_msg.edit_text("❌ Match not found. Please try more specific team names.")
         return ConversationHandler.END
 
     prob = result['prob']
-    # İstediğin Emoji ve Şablon Düzeni
+    # Dinamik Emoji ve Sonuç Şablonu
     status_icon = "✅" if prob >= 50 else "⛔️"
     status_text = "BTTS YES" if prob >= 50 else "BTTS NO"
 
@@ -101,10 +99,10 @@ async def get_away_and_analyze(update: Update, context: ContextTypes.DEFAULT_TYP
     await wait_msg.delete()
     await update.message.reply_text(final_report)
     
-    # ANALİZ BİTTİ, OTURUM KAPANDI (API isteği burada kesilir)
+    # Oturum Kapanır, API isteği durdurulur.
     return ConversationHandler.END
 
-# --- ANA MOTOR ---
+# --- BAŞLATICI ---
 if __name__ == '__main__':
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -119,5 +117,5 @@ if __name__ == '__main__':
 
     app.add_handler(conv_handler)
     
-    print("Sistem Hazır. API istekleri sadece analiz sırasında yapılacak.")
+    print("Bot is LIVE with NEW TOKEN. Waiting for admin commands...")
     app.run_polling()
