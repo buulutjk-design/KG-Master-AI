@@ -1,185 +1,123 @@
-import logging
-import sqlite3
 import requests
-import os
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-    ConversationHandler,
-    Defaults
+    Application, CommandHandler, MessageHandler, filters, 
+    ContextTypes, ConversationHandler
 )
-from telegram.constants import ParseMode
 
 # --- AYARLAR ---
-BOT_TOKEN = "8624704713:AAFUq5ycoEDf_3Ms_fnGBBoBqcV7Tvb4mqw"
+BOT_TOKEN = "8540157840:AAEU16aFsx1opTfESiGyx0WQN18EjUj75BU"
 ADMIN_ID = 8480843841
 API_KEY = "2180b95ef16955595f12d9f9cdebcd74"
 API_URL = "https://v3.football.api-sports.io"
 
-# --- MESAJ TASLAKLARI ---
-VIP_YOK_MSG = "ℹ️: Bot Kullanmak için VİP Olmalısınız.\n💰: 7 Günlük Üyelik 700₺\n📞: İletişim @blutad"
-VIP_HOSGELDIN = "⚽️: 7 Günlük VİP ÜYELİĞİNİZ Tanımlanmıştır. Bol Şanslar Dileriz ☘️\nkomut: /start"
-VIP_BITTI_MSG = "ℹ️: Sayın Kullanıcı VİP Üyeliğinizin Süresi Dolmuştur.\n📞: İletişim @blutad"
-ANALIZ_BASLADI = "🌎 Bugün Bültendeki Dünya Geneli Maçlar Analiz Ediliyor..datalar…."
+# Durumlar
+HOME_NAME, AWAY_NAME = range(2)
 
-# Analiz Adımları
-COUNT, CONFIDENCE = range(2)
-
-# --- VERİTABANI YÖNETİMİ ---
-def init_db():
-    conn = sqlite3.connect('vip_system.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, expire_date TEXT)''')
-    conn.commit()
-    conn.close()
-
-def is_vip(user_id):
-    if user_id == ADMIN_ID: return True
-    conn = sqlite3.connect('vip_system.db')
-    c = conn.cursor()
-    c.execute("SELECT expire_date FROM users WHERE user_id=?", (user_id,))
-    res = c.fetchone()
-    conn.close()
-    if res:
-        expire_date = datetime.fromisoformat(res[0])
-        return expire_date > datetime.now()
-    return False
-
-# --- GELİŞMİŞ KG ANALİZ MOTORU ---
-def get_real_kg_analysis(match_limit, min_confidence):
+# --- NOKTA ATIŞI ANALİZ MOTORU ---
+def get_match_analysis(home_query, away_query):
     headers = {'x-rapidapi-key': API_KEY, 'x-rapidapi-host': 'v3.football.api-sports.io'}
     today = datetime.now().strftime('%Y-%m-%d')
+    tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
     
-    try:
-        # 1. Bugünün tüm maçlarını getir
-        f_res = requests.get(f"{API_URL}/fixtures?date={today}", headers=headers).json()
-    except: return []
-
-    analyzed = []
-    # Bültendeki başlamamış ilk 50 maçı tara (Limitleri korumak için)
-    fixtures = [f for f in f_res.get('response', []) if f['fixture']['status']['short'] == 'NS'][:50]
-
-    for f in fixtures:
-        fid = f['fixture']['id']
+    found_fixture = None
+    
+    # Sadece bugün ve yarınki maçlar taranır
+    for date in [today, tomorrow]:
         try:
-            # 2. Her maç için derin tahmin verilerini çek (xG, Form, Sakatlık, Lig faktörü dahil)
-            p_res = requests.get(f"{API_URL}/predictions?fixture={fid}", headers=headers).json()
-            if p_res.get('response'):
-                data = p_res['response'][0]
-                # API'nin hesapladığı KG Var (BTTS) yüzdesi
-                prob_str = data['predictions']['percent']['btts']
-                prob = int(prob_str.replace('%', '')) if prob_str else 0
+            # API'den o günkü maç listesini tek seferde çeker
+            res = requests.get(f"{API_URL}/fixtures?date={date}", headers=headers).json()
+            for f in res.get('response', []):
+                h_name = f['teams']['home']['name'].lower()
+                a_name = f['teams']['away']['name'].lower()
                 
-                if prob >= int(min_confidence):
-                    home = f['teams']['home']['name']
-                    away = f['teams']['away']['name']
-                    analyzed.append((f"🏳️ {home} - {away}", prob))
+                # İsim eşleşmesi (Takımları bulursa döngüden çıkar)
+                if home_query.lower() in h_name and away_query.lower() in a_name:
+                    found_fixture = f
+                    break
+            if found_fixture: break
         except: continue
 
-    # Yüzdeye göre sırala
-    analyzed.sort(key=lambda x: x[1], reverse=True)
-    return analyzed[:match_limit]
+    if not found_fixture: return None
 
-# --- BOT KOMUTLARI ---
+    # Eşleşen maç için TEK bir analiz isteği atar
+    try:
+        f_id = found_fixture['fixture']['id']
+        p_res = requests.get(f"{API_URL}/predictions?fixture={f_id}", headers=headers).json()
+        if p_res.get('response'):
+            data = p_res['response'][0]
+            prob_str = data['predictions']['percent']['btts']
+            prob = int(prob_str.replace('%', '')) if prob_str else 0
+            return {
+                "home": found_fixture['teams']['home']['name'],
+                "away": found_fixture['teams']['away']['name'],
+                "prob": prob
+            }
+    except: return None
+    return None
+
+# --- BOT AKIŞI ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_vip(user_id):
-        await update.message.reply_text(VIP_YOK_MSG)
+    # SADECE ADMİN KULLANABİLİR
+    if update.effective_user.id != ADMIN_ID:
         return ConversationHandler.END
     
-    await update.message.reply_text("ℹ️: KG Analizi Yapılacak Maç Sayısı.")
-    return COUNT
+    await update.message.reply_text("👋 Welcome to the BTTS Analysis Bot")
+    await update.message.reply_text("🏳 Home Team Name.")
+    return HOME_NAME
 
-async def get_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        context.user_data['m_count'] = int(update.message.text)
-        await update.message.reply_text("ℹ️: Güven Aralığı Giriniz [ % ]")
-        return CONFIDENCE
-    except:
-        await update.message.reply_text("Lütfen sadece sayı giriniz.")
-        return COUNT
+async def get_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['home_team'] = update.message.text
+    await update.message.reply_text("🚩 Away Team Name:")
+    return AWAY_NAME
 
-async def get_confidence_and_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        conf = int(update.message.text.replace('%', ''))
-        count = context.user_data['m_count']
-        await update.message.reply_text(ANALIZ_BASLADI)
-        
-        matches = get_real_kg_analysis(count, conf)
-        
-        if not matches:
-            await update.message.reply_text("❌ Kriterlere uygun maç bulunamadı.")
-            return ConversationHandler.END
-
-        # Mesaj İnşası
-        res_text = f"Günün Maçları 🔥\n({len(matches)})\n\n"
-        avg_conf = 0
-        for m_name, m_prob in matches:
-            res_text += f"{m_name}\n"
-            avg_conf += m_prob
-        
-        real_avg = avg_conf // len(matches)
-        res_text += f"\nℹ️: Güven Durumu [ % {real_avg} ]"
-        
-        await update.message.reply_text(res_text)
+async def get_away_and_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    away_team = update.message.text
+    home_team = context.user_data['home_team']
+    
+    wait_msg = await update.message.reply_text("⏳ Analysing...")
+    
+    # Analiz yapılır
+    result = get_match_analysis(home_team, away_team)
+    
+    if not result:
+        await wait_msg.edit_text("❌ Match not found. Check team names.")
         return ConversationHandler.END
-    except:
-        await update.message.reply_text("Hata! Lütfen güven oranını sayı olarak giriniz.")
-        return CONFIDENCE
 
-# --- ADMİN PANELİ ---
-async def vipekle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    try:
-        uid = int(context.args[0])
-        exp = datetime.now() + timedelta(days=7)
-        conn = sqlite3.connect('vip_system.db')
-        c = conn.cursor()
-        c.execute("INSERT OR REPLACE INTO users VALUES (?, ?)", (uid, exp.isoformat()))
-        conn.commit()
-        conn.close()
-        await update.message.reply_text(f"✅ {uid} başarıyla 7 günlük VIP yapıldı.")
-        await context.bot.send_message(chat_id=uid, text=VIP_HOSGELDIN)
-    except:
-        await update.message.reply_text("Kullanım: /vipekle id")
+    prob = result['prob']
+    # İstediğin Emoji ve Şablon Düzeni
+    status_icon = "✅" if prob >= 50 else "⛔️"
+    status_text = "BTTS YES" if prob >= 50 else "BTTS NO"
 
-# --- SÜRE KONTROLÜ ---
-async def check_expiry(context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect('vip_system.db')
-    c = conn.cursor()
-    c.execute("SELECT user_id, expire_date FROM users")
-    for uid, exp in c.fetchall():
-        if datetime.fromisoformat(exp) < datetime.now():
-            c.execute("DELETE FROM users WHERE user_id=?", (uid,))
-            try: await context.bot.send_message(chat_id=uid, text=VIP_BITTI_MSG)
-            except: pass
-    conn.commit()
-    conn.close()
+    final_report = (
+        "📊 MATCH ANALYSIS\n\n"
+        f"🏳 {result['home']}\n"
+        f"🚩 {result['away']}\n\n"
+        f"{status_icon} {status_text}\n"
+        f"{prob}%"
+    )
+    
+    await wait_msg.delete()
+    await update.message.reply_text(final_report)
+    
+    # ANALİZ BİTTİ, OTURUM KAPANDI (API isteği burada kesilir)
+    return ConversationHandler.END
 
 # --- ANA MOTOR ---
 if __name__ == '__main__':
-    init_db()
     app = Application.builder().token(BOT_TOKEN).build()
 
-    conv = ConversationHandler(
+    conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
-            COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_count)],
-            CONFIDENCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_confidence_and_analyze)],
+            HOME_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_home)],
+            AWAY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_away_and_analyze)],
         },
         fallbacks=[],
     )
 
-    app.add_handler(conv)
-    app.add_handler(CommandHandler('vipekle', vipekle))
+    app.add_handler(conv_handler)
     
-    if app.job_queue:
-        app.job_queue.run_repeating(check_expiry, interval=3600, first=10)
-
-    print("--- KG MASTER AI AKTİF ---")
+    print("Sistem Hazır. API istekleri sadece analiz sırasında yapılacak.")
     app.run_polling()
