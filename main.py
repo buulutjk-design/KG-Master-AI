@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 BOT_TOKEN = "8727632778:AAEbNjZzXfS8GHLIoDtoJHAgKMxL4P6y_go"
 ADMIN_ID = 8480843841
-API_KEY = "7d7e4508cb4cfe8006ccc9422bb28b1d"  # YENİ KEY
+API_KEY = "7d7e4508cb4cfe8006ccc9422bb28b1d"
 API_URL = "https://v3.football.api-sports.io"
 
 HOME_NAME, AWAY_NAME = range(2)
@@ -131,6 +131,7 @@ def get_match_analysis(team1, team2):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return ConversationHandler.END
+    context.user_data.clear()
     await update.message.reply_text("👋 BTTS Analysis Bot")
     await update.message.reply_text("🏳 Home Team Name:")
     return HOME_NAME
@@ -143,8 +144,12 @@ async def get_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    t1 = context.user_data["t1"]
+    t1 = context.user_data.get("t1", "")
     t2 = update.message.text
+
+    if not t1:
+        await update.message.reply_text("⚠️ Please send /start first.")
+        return ConversationHandler.END
 
     wait = await update.message.reply_text("🛜 Analyzing...")
     result = get_match_analysis(t1, t2)
@@ -171,23 +176,50 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("❌ Cancelled. Send /start to begin again.")
+    return ConversationHandler.END
+
+
+async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⚠️ Please send /start to begin.")
+
+
 def run_bot():
     while True:
         try:
             app = Application.builder().token(BOT_TOKEN).build()
+
             conv = ConversationHandler(
                 entry_points=[CommandHandler("start", start)],
                 states={
-                    HOME_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_home)],
-                    AWAY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, analyze)]
+                    HOME_NAME: [
+                        CommandHandler("start", start),
+                        MessageHandler(filters.TEXT & ~filters.COMMAND, get_home)
+                    ],
+                    AWAY_NAME: [
+                        CommandHandler("start", start),
+                        MessageHandler(filters.TEXT & ~filters.COMMAND, analyze)
+                    ],
                 },
-                fallbacks=[]
+                fallbacks=[
+                    CommandHandler("cancel", cancel),
+                    CommandHandler("start", start),
+                ],
+                allow_reentry=True,
+                name="btts_conv",
+                persistent=False,
             )
+
             app.add_handler(conv)
+            app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown))
+
             print("BOT RUNNING")
-            app.run_polling()
+            app.run_polling(drop_pending_updates=True)
+
         except Exception as e:
-            print("BOT RESTARTING", e)
+            print("BOT RESTARTING:", e)
             time.sleep(5)
 
 
