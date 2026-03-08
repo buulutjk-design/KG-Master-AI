@@ -21,7 +21,7 @@ ADMIN_ID = 8480843841
 API_KEY = "2180b95ef16955595f12d9f9cdebcd74"
 API_URL = "https://v3.football.api-sports.io"
 
-# --- MESAJ TASLAKLARI (TAM İSTEDİĞİN GİBİ) ---
+# --- MESAJ TASLAKLARI ---
 VIP_YOK_MSG = "ℹ️: Bot Kullanmak için VİP Olmalısınız.\n💰: 7 Günlük Üyelik 700₺\n📞: İletişim @blutad"
 VIP_HOSGELDIN = "⚽️: 7 Günlük VİP ÜYELİĞİNİZ Tanımlanmıştır. Bol Şanslar Dileriz ☘️\nkomut: /start"
 VIP_BITTI_MSG = "ℹ️: Sayın Kullanıcı VİP Üyeliğinizin Süresi Dolmuştur.\n📞: İletişim @blutad"
@@ -30,12 +30,11 @@ ANALIZ_BASLADI = "🌎 Bugün Bültendeki Dünya Geneli Maçlar Analiz Ediliyor.
 # Analiz Adımları
 COUNT, CONFIDENCE = range(2)
 
-# --- VERİTABANI SİSTEMİ ---
+# --- VERİTABANI YÖNETİMİ ---
 def init_db():
     conn = sqlite3.connect('vip_system.db')
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users 
-                 (user_id INTEGER PRIMARY KEY, expire_date TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, expire_date TEXT)''')
     conn.commit()
     conn.close()
 
@@ -51,28 +50,28 @@ def is_vip(user_id):
         return expire_date > datetime.now()
     return False
 
-# --- GERÇEK ANALİZ MOTORU (BEYİN) ---
+# --- GELİŞMİŞ KG ANALİZ MOTORU ---
 def get_real_kg_analysis(match_limit, min_confidence):
     headers = {'x-rapidapi-key': API_KEY, 'x-rapidapi-host': 'v3.football.api-sports.io'}
     today = datetime.now().strftime('%Y-%m-%d')
     
-    # 1. Bugünün maçlarını çek
     try:
+        # 1. Bugünün tüm maçlarını getir
         f_res = requests.get(f"{API_URL}/fixtures?date={today}", headers=headers).json()
     except: return []
 
     analyzed = []
-    # API limitini korumak için en popüler/başlamamış ilk 40 maça odaklan
-    fixtures = [f for f in f_res.get('response', []) if f['fixture']['status']['short'] == 'NS'][:40]
+    # Bültendeki başlamamış ilk 50 maçı tara (Limitleri korumak için)
+    fixtures = [f for f in f_res.get('response', []) if f['fixture']['status']['short'] == 'NS'][:50]
 
     for f in fixtures:
         fid = f['fixture']['id']
-        # 2. Tahmin verilerini çek (xG, Form, Sakatlık, Lig faktörü burada işlenmiş haldedir)
         try:
+            # 2. Her maç için derin tahmin verilerini çek (xG, Form, Sakatlık, Lig faktörü dahil)
             p_res = requests.get(f"{API_URL}/predictions?fixture={fid}", headers=headers).json()
             if p_res.get('response'):
                 data = p_res['response'][0]
-                # API'nin kendi BTTS (KG) yüzdesi (xG ve form dahil hesaplanır)
+                # API'nin hesapladığı KG Var (BTTS) yüzdesi
                 prob_str = data['predictions']['percent']['btts']
                 prob = int(prob_str.replace('%', '')) if prob_str else 0
                 
@@ -82,11 +81,11 @@ def get_real_kg_analysis(match_limit, min_confidence):
                     analyzed.append((f"🏳️ {home} - {away}", prob))
         except: continue
 
-    # En yüksek ihtimalliden sırala ve istenen adet kadar seç
+    # Yüzdeye göre sırala
     analyzed.sort(key=lambda x: x[1], reverse=True)
     return analyzed[:match_limit]
 
-# --- BOT HANDLERS ---
+# --- BOT KOMUTLARI ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_vip(user_id):
@@ -98,45 +97,42 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def get_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        val = int(update.message.text)
-        context.user_data['m_count'] = val
+        context.user_data['m_count'] = int(update.message.text)
         await update.message.reply_text("ℹ️: Güven Aralığı Giriniz [ % ]")
         return CONFIDENCE
     except:
-        await update.message.reply_text("Lütfen bir sayı giriniz.")
+        await update.message.reply_text("Lütfen sadece sayı giriniz.")
         return COUNT
 
 async def get_confidence_and_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         conf = int(update.message.text.replace('%', ''))
         count = context.user_data['m_count']
-        
         await update.message.reply_text(ANALIZ_BASLADI)
         
-        # Gerçek Analizi Çalıştır
         matches = get_real_kg_analysis(count, conf)
         
         if not matches:
             await update.message.reply_text("❌ Kriterlere uygun maç bulunamadı.")
             return ConversationHandler.END
 
-        # Mesajı İnşa Et
-        res_text = f"**Günün Maçları 🔥**\n({len(matches)})\n\n"
+        # Mesaj İnşası
+        res_text = f"Günün Maçları 🔥\n({len(matches)})\n\n"
         avg_conf = 0
         for m_name, m_prob in matches:
             res_text += f"{m_name}\n"
             avg_conf += m_prob
         
         real_avg = avg_conf // len(matches)
-        res_text += f"\nℹ️: **Güven Durumu [ % {real_avg} ]**"
+        res_text += f"\nℹ️: Güven Durumu [ % {real_avg} ]"
         
-        await update.message.reply_text(res_text, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(res_text)
         return ConversationHandler.END
     except:
-        await update.message.reply_text("Hata oluştu, lütfen % değerini sayı olarak giriniz.")
+        await update.message.reply_text("Hata! Lütfen güven oranını sayı olarak giriniz.")
         return CONFIDENCE
 
-# --- ADMIN İŞLEMLERİ ---
+# --- ADMİN PANELİ ---
 async def vipekle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     try:
@@ -152,7 +148,7 @@ async def vipekle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         await update.message.reply_text("Kullanım: /vipekle id")
 
-# --- OTOMATİK SÜRE KONTROLÜ ---
+# --- SÜRE KONTROLÜ ---
 async def check_expiry(context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect('vip_system.db')
     c = conn.cursor()
@@ -165,14 +161,11 @@ async def check_expiry(context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-# --- ANA ÇALIŞTIRICI ---
+# --- ANA MOTOR ---
 if __name__ == '__main__':
     init_db()
-    # ParseMode ve JobQueue desteği ile botu kur
-    defaults = Defaults(parse_mode=ParseMode.MARKDOWN)
-    app = Application.builder().token(BOT_TOKEN).defaults(defaults).build()
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    # Diyalog Yönetimi
     conv = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
@@ -185,9 +178,8 @@ if __name__ == '__main__':
     app.add_handler(conv)
     app.add_handler(CommandHandler('vipekle', vipekle))
     
-    # Süre Kontrolü (Her saat başı)
     if app.job_queue:
         app.job_queue.run_repeating(check_expiry, interval=3600, first=10)
 
-    print("--- KG MASTER AI ATEŞLENDİ ---")
+    print("--- KG MASTER AI AKTİF ---")
     app.run_polling()
