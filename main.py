@@ -27,15 +27,29 @@ def safe_request(url):
     return None
 
 
+def normalize(text):
+    # Türkçe karakterleri İngilizce'ye çevir
+    tr = "çÇğĞıİöÖşŞüÜ"
+    en = "cCgGiIoOsSupU"
+    for t, e in zip(tr, en):
+        text = text.replace(t, e)
+    return text
+
+
 def search_team_id(team_name):
+    # Önce orijinal adla ara
     r = safe_request(f"{API_URL}/teams?search={team_name}")
-    if not r:
-        return None, None
-    teams = r.get("response", [])
-    if not teams:
-        return None, None
-    t = teams[0]["team"]
-    return t["id"], t["name"]
+    if r and r.get("response"):
+        t = r["response"][0]["team"]
+        return t["id"], t["name"]
+    # Bulunamazsa normalize edip tekrar ara
+    normalized = normalize(team_name)
+    if normalized != team_name:
+        r2 = safe_request(f"{API_URL}/teams?search={normalized}")
+        if r2 and r2.get("response"):
+            t = r2["response"][0]["team"]
+            return t["id"], t["name"]
+    return None, None
 
 
 def calc_weighted_btts(matches):
@@ -85,7 +99,6 @@ def get_h2h(id1, id2, last=6):
 def get_match_analysis(team1, team2):
     key = f"{team1.lower()}_{team2.lower()}"
     now = datetime.now().timestamp()
-
     if key in analysis_cache:
         if now - analysis_cache[key]["time"] < CACHE_TIME:
             return analysis_cache[key]["data"]
@@ -115,7 +128,6 @@ def get_match_analysis(team1, team2):
 
     weighted = s_hg * 1.0 + s_hh * 1.5 + s_ag * 1.0 + s_aa * 1.5
     total_w = 5.0
-
     if s_h2 is not None:
         weighted += s_h2 * 2.0
         total_w += 2.0
@@ -132,7 +144,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return ConversationHandler.END
     context.user_data.clear()
-    await update.message.reply_text("👋 BTTS Analysis Bot")
     await update.message.reply_text("🏳 Home Team Name:")
     return HOME_NAME
 
@@ -147,15 +158,11 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t1 = context.user_data.get("t1", "")
     t2 = update.message.text
 
-    if not t1:
-        await update.message.reply_text("⚠️ Please send /start first.")
-        return ConversationHandler.END
-
     wait = await update.message.reply_text("🛜 Analyzing...")
     result = get_match_analysis(t1, t2)
 
     if "error" in result:
-        await wait.edit_text(f"❌ {result['error']}")
+        await wait.edit_text(f"❌ {result['error']}\n\nSend /start to try again.")
         return ConversationHandler.END
 
     await wait.delete()
@@ -169,7 +176,8 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🏳 {result['h']}\n"
         f"🚩 {result['a']}\n\n"
         f"{icon} {status}\n"
-        f"{prob}%"
+        f"{prob}%\n\n"
+        "➡️ Send /start for new analysis."
     )
 
     await update.message.reply_text(report)
@@ -178,12 +186,8 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text("❌ Cancelled. Send /start to begin again.")
+    await update.message.reply_text("❌ Cancelled. Send /start to begin.")
     return ConversationHandler.END
-
-
-async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚠️ Please send /start to begin.")
 
 
 def run_bot():
@@ -196,11 +200,11 @@ def run_bot():
                 states={
                     HOME_NAME: [
                         CommandHandler("start", start),
-                        MessageHandler(filters.TEXT & ~filters.COMMAND, get_home)
+                        MessageHandler(filters.TEXT & ~filters.COMMAND, get_home),
                     ],
                     AWAY_NAME: [
                         CommandHandler("start", start),
-                        MessageHandler(filters.TEXT & ~filters.COMMAND, analyze)
+                        MessageHandler(filters.TEXT & ~filters.COMMAND, analyze),
                     ],
                 },
                 fallbacks=[
@@ -208,12 +212,10 @@ def run_bot():
                     CommandHandler("start", start),
                 ],
                 allow_reentry=True,
-                name="btts_conv",
-                persistent=False,
             )
 
             app.add_handler(conv)
-            app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown))
+            # unknown handler KALDIRILDI - çakışmaya neden oluyordu
 
             print("BOT RUNNING")
             app.run_polling(drop_pending_updates=True)
