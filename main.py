@@ -220,18 +220,33 @@ def get_fixtures_by_team(team_id, last=15, venue=None):
     return matches
 
 
-def get_h2h(id1, id2, last=4):
-    r = safe_request(f"{API_URL}/fixtures/headtohead?h2h={id1}-{id2}&last={last}")
+def get_h2h_smart(id1, id2):
+    """
+    Son 10 H2H çek, sadece son 3 yıldan olanları kullan.
+    Eğer son 3 yılda yeterli maç yoksa H2H'ı tamamen atla.
+    """
+    r = safe_request(f"{API_URL}/fixtures/headtohead?h2h={id1}-{id2}&last=10")
     if not r:
-        return []
-    matches = []
+        return [], 0, 0
+
+    cutoff_3y = datetime.now(timezone.utc) - timedelta(days=3 * 365)
+    recent_matches = []
+    total_found = 0
+
     for m in r.get("response", []):
         gh = m["goals"]["home"]
         ga = m["goals"]["away"]
         if gh is None or ga is None:
             continue
-        matches.append((gh, ga))
-    return matches
+        total_found += 1
+        try:
+            match_date = datetime.fromisoformat(m["fixture"]["date"].replace("Z", "+00:00"))
+            if match_date >= cutoff_3y:
+                recent_matches.append((gh, ga))
+        except:
+            pass
+
+    return recent_matches, len(recent_matches), total_found
 
 
 def get_team_league(team_id):
@@ -266,10 +281,10 @@ def get_standings_form(team_id, league_id, season):
 
 def get_season_btts(team_id, league_id, season):
     if not league_id or not season:
-        return None
+        return None, 0, 0
     r = safe_request(f"{API_URL}/fixtures?team={team_id}&league={league_id}&season={season}&status=FT")
     if not r:
-        return None
+        return None, 0, 0
     matches = []
     for m in r.get("response", []):
         gh = m["goals"]["home"]
@@ -278,9 +293,9 @@ def get_season_btts(team_id, league_id, season):
             continue
         matches.append((gh, ga))
     if len(matches) < 5:
-        return None
-    btts = sum(1 for gh, ga in matches if gh > 0 and ga > 0)
-    return btts / len(matches)
+        return None, 0, len(matches)
+    btts_count = sum(1 for gh, ga in matches if gh > 0 and ga > 0)
+    return btts_count / len(matches), btts_count, len(matches)
 
 
 def poisson_prob(lam, k):
@@ -340,16 +355,19 @@ def calc_weighted_avg(values, decay=0.85):
     return weighted_sum / total_w if total_w > 0 else 0
 
 
-def calc_weighted_btts_historical(matches):
+def calc_btts_stats(matches):
+    """BTTS istatistikleri — ağırlıklı oran + ham sayı"""
     if not matches:
-        return 0.5
+        return 0.5, 0, 0
     total_w, btts_w = 0, 0
+    btts_count = 0
     for i, (gh, ga) in enumerate(matches):
         w = i + 1
         total_w += w
         if gh > 0 and ga > 0:
             btts_w += w
-    return btts_w / total_w
+            btts_count += 1
+    return btts_w / total_w, btts_count, len(matches)
 
 
 def get_league_avg(stats):
@@ -369,15 +387,19 @@ def analyze_teams(id1, name1, id2, name2):
         if now - analysis_cache[key]["time"] < CACHE_TIME:
             return analysis_cache[key]["data"]
 
-    home_general = get_fixtures_by_team(id1, last=15)
+    # Maç verileri
+    home_general = get_fixtures_by_team(id1, last=10)
     home_at_home = get_fixtures_by_team(id1, last=20, venue="home")[:10]
-    away_general = get_fixtures_by_team(id2, last=15)
+    away_general = get_fixtures_by_team(id2, last=10)
     away_at_away = get_fixtures_by_team(id2, last=20, venue="away")[:10]
-    h2h          = get_h2h(id1, id2, last=4)
 
     if not home_general or not away_general:
         return None
 
+    # H2H — sadece son 3 yıl
+    h2h, h2h_recent_count, h2h_total = get_h2h_smart(id1, id2)
+
+    # Lig & istatistik
     league_id1, season1 = get_team_league(id1)
     league_id2, season2 = get_team_league(id2)
     stats1 = get_team_statistics(id1, league_id1, season1) if league_id1 else None
@@ -385,17 +407,22 @@ def analyze_teams(id1, name1, id2, name2):
     rank1, form1 = get_standings_form(id1, league_id1, season1) if league_id1 else (None, None)
     rank2, form2 = get_standings_form(id2, league_id2, season2) if league_id2 else (None, None)
 
-    season_btts1 = get_season_btts(id1, league_id1, season1)
-    season_btts2 = get_season_btts(id2, league_id2, season2)
+    # Sezon KG %
+    season_rate1, season_btts_count1, season_total1 = get_season_btts(id1, league_id1, season1)
+    season_rate2, season_btts_count2, season_total2 = get_season_btts(id2, league_id2, season2)
 
+    # Lambda hesapla
     avg1, _ = get_league_avg(stats1)
     avg2, _ = get_league_avg(stats2)
     league_avg = (avg1 + avg2) / 2
 
-    home_scored   = [gh for gh, ga in (home_at_home or home_general)]
-    home_conceded = [ga for gh, ga in (home_at_home or home_general)]
-    away_scored   = [ga for gh, ga in (away_at_away or away_general)]
-    away_conceded = [gh for gh, ga in (away_at_away or away_general)]
+    home_fixtures = home_at_home or home_general
+    away_fixtures = away_at_away or away_general
+
+    home_scored   = [gh for gh, ga in home_fixtures]
+    home_conceded = [ga for gh, ga in home_fixtures]
+    away_scored   = [ga for gh, ga in away_fixtures]
+    away_conceded = [gh for gh, ga in away_fixtures]
 
     home_attack  = calc_weighted_avg(home_scored)   / league_avg if league_avg > 0 else 1.0
     home_defense = calc_weighted_avg(home_conceded) / league_avg if league_avg > 0 else 1.0
@@ -405,25 +432,51 @@ def analyze_teams(id1, name1, id2, name2):
     lambda_home = max(0.2, min(home_attack * away_defense * league_avg * 1.08, 5.0))
     lambda_away = max(0.2, min(away_attack * home_defense * league_avg, 5.0))
 
-    btts_home_hist = calc_weighted_btts_historical(home_at_home or home_general)
-    btts_away_hist = calc_weighted_btts_historical(away_at_away or away_general)
-    btts_h2h_hist  = calc_weighted_btts_historical(h2h) if h2h else None
+    # BTTS istatistikleri — son 10 maç
+    home_btts_rate, home_btts_count, home_total = calc_btts_stats(home_general)
+    away_btts_rate, away_btts_count, away_total = calc_btts_stats(away_general)
 
-    historical_btts = (btts_home_hist + btts_away_hist) / 2
-    if btts_h2h_hist is not None:
-        historical_btts = historical_btts * 0.6 + btts_h2h_hist * 0.4
+    # Ev/dep spesifik
+    home_home_rate, _, _ = calc_btts_stats(home_at_home)
+    away_away_rate, _, _ = calc_btts_stats(away_at_away)
 
-    if season_btts1 is not None and season_btts2 is not None:
-        season_avg = (season_btts1 + season_btts2) / 2
+    # Historical BTTS
+    historical_btts = (
+        home_home_rate * 1.5 +
+        away_away_rate * 1.5 +
+        home_btts_rate * 1.0 +
+        away_btts_rate * 1.0
+    ) / 5.0
+
+    # H2H — sadece son 3 yıl varsa ekle
+    h2h_note = ""
+    if h2h and h2h_recent_count >= 2:
+        h2h_rate, h2h_btts_count, h2h_len = calc_btts_stats(h2h)
+        historical_btts = historical_btts * 0.60 + h2h_rate * 0.40
+        h2h_note = f"{h2h_btts_count}/{h2h_len}"
+    elif h2h_total > 0 and h2h_recent_count == 0:
+        h2h_note = "old"  # Tüm H2H 3 yıldan eski, kullanılmadı
+    elif h2h_recent_count == 1:
+        h2h_rate, h2h_btts_count, h2h_len = calc_btts_stats(h2h)
+        historical_btts = historical_btts * 0.80 + h2h_rate * 0.20
+        h2h_note = f"{h2h_btts_count}/{h2h_len}"
+    else:
+        h2h_note = "none"
+
+    # Sezon KG % entegrasyonu
+    if season_rate1 is not None and season_rate2 is not None:
+        season_avg = (season_rate1 + season_rate2) / 2
         historical_btts = historical_btts * 0.50 + season_avg * 0.50
-    elif season_btts1 is not None:
-        historical_btts = historical_btts * 0.70 + season_btts1 * 0.30
-    elif season_btts2 is not None:
-        historical_btts = historical_btts * 0.70 + season_btts2 * 0.30
+    elif season_rate1 is not None:
+        historical_btts = historical_btts * 0.70 + season_rate1 * 0.30
+    elif season_rate2 is not None:
+        historical_btts = historical_btts * 0.70 + season_rate2 * 0.30
 
+    # Poisson + Monte Carlo
     poisson_btts = dixon_coles_btts(lambda_home, lambda_away)
     mc_btts      = monte_carlo_btts(lambda_home, lambda_away, 10000)
 
+    # Form bonusu
     form_bonus = 0.0
     for form in [form1, form2]:
         if form:
@@ -431,17 +484,43 @@ def analyze_teams(id1, name1, id2, name2):
             scored = sum(1 for f in last5 if f in ["W", "D"])
             form_bonus += (scored / len(last5) - 0.5) * 0.05
 
+    # Sıralama bonusu
     rank_bonus = 0.0
     if rank1 and rank2:
         avg_rank = (rank1 + rank2) / 2
         rank_bonus = 0.03 if avg_rank <= 5 else (-0.03 if avg_rank > 15 else 0.0)
 
+    # Final
     final = (
         historical_btts * 0.30 +
         poisson_btts    * 0.35 +
         mc_btts         * 0.35
     ) + form_bonus + rank_bonus
     final = max(0.05, min(0.95, final))
+
+    # Güvenilirlik uyarıları
+    warnings = []
+    if len(home_general) < 5:
+        warnings.append("⚠️ Insufficient home team data")
+    if len(away_general) < 5:
+        warnings.append("⚠️ Insufficient away team data")
+    if h2h_note == "none":
+        warnings.append("⚠️ No H2H data found")
+    elif h2h_note == "old":
+        warnings.append("⚠️ H2H data older than 3 years — not used")
+    elif h2h_recent_count < 2:
+        warnings.append("⚠️ Limited recent H2H data")
+    if lambda_home <= 0.3 and lambda_away <= 0.3:
+        warnings.append("⚠️ Very low xG — data may be unreliable")
+    if season_rate1 is None or season_rate2 is None:
+        warnings.append("⚠️ Season statistics incomplete")
+
+    if len(warnings) == 0:
+        reliability = "🟢 High"
+    elif len(warnings) == 1:
+        reliability = "🟡 Medium"
+    else:
+        reliability = "🔴 Low — treat with caution"
 
     result = {
         "h": name1, "a": name2,
@@ -451,8 +530,19 @@ def analyze_teams(id1, name1, id2, name2):
         "hist":    int(historical_btts * 100),
         "poisson": int(poisson_btts * 100),
         "mc":      int(mc_btts * 100),
-        "s1": int(season_btts1 * 100) if season_btts1 is not None else None,
-        "s2": int(season_btts2 * 100) if season_btts2 is not None else None,
+        # Son 10 maç KG sayısı
+        "home_btts": f"{home_btts_count}/{home_total}",
+        "away_btts": f"{away_btts_count}/{away_total}",
+        # Sezon KG
+        "s1": int(season_rate1 * 100) if season_rate1 is not None else None,
+        "s2": int(season_rate2 * 100) if season_rate2 is not None else None,
+        "s1_count": f"{season_btts_count1}/{season_total1}" if season_rate1 is not None else None,
+        "s2_count": f"{season_btts_count2}/{season_total2}" if season_rate2 is not None else None,
+        # H2H
+        "h2h_note": h2h_note,
+        # Güvenilirlik
+        "warnings": warnings,
+        "reliability": reliability,
     }
     analysis_cache[key] = {"data": result, "time": now}
     return result
@@ -520,7 +610,9 @@ def build_daily_combine():
                 fix["home_id"], fix["home_name"],
                 fix["away_id"], fix["away_name"]
             )
-            if result and result["p"] >= COMBINE_THRESHOLD:
+            if (result and
+                result["p"] >= COMBINE_THRESHOLD and
+                result["reliability"] != "🔴 Low — treat with caution"):
                 qualified.append({**fix, **result})
             time.sleep(0.2)
         except:
@@ -666,13 +758,32 @@ async def get_away(update: Update, context: ContextTypes.DEFAULT_TYPE):
     icon   = "✅" if prob >= 50 else "⛔️"
     status = "BTTS YES" if prob >= 50 else "BTTS NO"
 
+    # Sezon KG satırı
     season_line = ""
     if result.get("s1") is not None and result.get("s2") is not None:
-        season_line = f"📅 Season KG%: {result['s1']}% / {result['s2']}%\n"
+        season_line = (
+            f"📅 Season KG: {result['h'].split()[0]} {result['s1']}% "
+            f"({result['s1_count']})  |  "
+            f"{result['a'].split()[0]} {result['s2']}% ({result['s2_count']})\n"
+        )
     elif result.get("s1") is not None:
-        season_line = f"📅 Season KG%: {result['s1']}%\n"
+        season_line = f"📅 Season KG: {result['h'].split()[0]} {result['s1']}% ({result['s1_count']})\n"
     elif result.get("s2") is not None:
-        season_line = f"📅 Season KG%: {result['s2']}%\n"
+        season_line = f"📅 Season KG: {result['a'].split()[0]} {result['s2']}% ({result['s2_count']})\n"
+
+    # H2H notu
+    h2h_line = ""
+    if result["h2h_note"] == "old":
+        h2h_line = "🕐 H2H: Only old data (3+ years) — not used\n"
+    elif result["h2h_note"] == "none":
+        h2h_line = "🕐 H2H: No data\n"
+    else:
+        h2h_line = f"🤝 H2H (last 3y): {result['h2h_note']} BTTS\n"
+
+    # Uyarılar
+    warning_lines = ""
+    if result.get("warnings"):
+        warning_lines = "\n" + "\n".join(result["warnings"]) + "\n"
 
     report = (
         "📊 MATCH ANALYSIS\n\n"
@@ -681,8 +792,12 @@ async def get_away(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚽ xG Home: {result['lh']}  |  Away: {result['la']}\n\n"
         f"📈 Historical:  {result['hist']}%\n"
         f"📐 Poisson/DC:  {result['poisson']}%\n"
-        f"🎲 Monte Carlo: {result['mc']}%\n"
-        f"{season_line}\n"
+        f"🎲 Monte Carlo: {result['mc']}%\n\n"
+        f"⚽ Last 10 BTTS: 🏳 {result['home_btts']}  |  🚩 {result['away_btts']}\n"
+        f"{season_line}"
+        f"{h2h_line}"
+        f"{warning_lines}\n"
+        f"📶 Reliability: {result['reliability']}\n\n"
         f"{icon} {status}\n"
         f"🎯 Final: {prob}%\n\n"
         "➡️ /analyze for new analysis\n"
