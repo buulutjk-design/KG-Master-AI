@@ -24,18 +24,25 @@ MAJOR_LEAGUES = {
     39: "Premier League",
     40: "Championship",
     41: "League One",
+    42: "League Two",
     45: "FA Cup",
     48: "League Cup",
     140: "La Liga",
     141: "Segunda Division",
+    142: "Copa del Rey",
     135: "Serie A",
     136: "Serie B",
+    137: "Coppa Italia",
     78: "Bundesliga",
     79: "2. Bundesliga",
+    80: "3. Liga",
+    81: "DFB Pokal",
     61: "Ligue 1",
     62: "Ligue 2",
+    66: "Coupe de France",
     203: "Süper Lig",
     204: "1. Lig",
+    205: "2. Lig",
     88: "Eredivisie",
     89: "Eerste Divisie",
     94: "Primeira Liga",
@@ -43,33 +50,87 @@ MAJOR_LEAGUES = {
     144: "Jupiler Pro League",
     179: "Scottish Premiership",
     180: "Scottish Championship",
+    181: "Scottish League One",
     235: "Premier League RU",
+    236: "FNL",
     218: "Bundesliga AT",
+    219: "2. Liga AT",
     207: "Super League CH",
+    208: "Challenge League",
     197: "Super League GR",
+    198: "Super League 2 GR",
     345: "Czech Liga",
+    346: "Czech FNL",
     106: "Ekstraklasa",
+    107: "I Liga PL",
     283: "Liga 1 RO",
+    284: "Liga 2 RO",
     210: "HNL",
     286: "Super Liga RS",
     119: "Superliga DK",
+    120: "1. Division DK",
     103: "Eliteserien",
+    104: "1. Division NO",
     113: "Allsvenskan",
+    114: "Superettan",
     244: "Veikkausliiga",
     333: "Premier League UA",
+    271: "OTP Bank Liga",
+    332: "Super Liga SK",
+    322: "PrvaLiga",
+    318: "Premier Liga BIH",
+    341: "Prva CFL",
+    316: "Kategoria Superiore",
+    172: "First League BG",
+    164: "Úrvalsdeild",
+    357: "League of Ireland",
+    374: "NIFL Premiership",
+    375: "Cymru Premier",
+    377: "A Lyga",
+    378: "Virsliga",
+    379: "Meistriliiga",
+    380: "Vysshaya Liga",
+    381: "Divizia Nationala",
     307: "Saudi Pro League",
+    435: "UAE Pro League",
+    350: "Stars League QAT",
+    290: "Persian Gulf Pro League",
+    384: "Ligat ha'Al",
     253: "MLS",
+    262: "Liga MX",
+    263: "Liga de Expansion MX",
+    321: "Canadian Premier League",
     71: "Serie A BR",
     72: "Serie B BR",
-    128: "Liga Profesional",
-    262: "Liga MX",
+    73: "Serie C BR",
+    128: "Liga Profesional AR",
+    129: "Primera Nacional AR",
+    265: "Primera Division CL",
+    239: "Liga BetPlay CO",
+    268: "Primera Division UY",
+    267: "Division Profesional PY",
+    281: "Liga 1 PE",
+    240: "LigaPro EC",
+    269: "Liga FUTVE",
     98: "J1 League",
+    99: "J2 League",
     292: "K League 1",
+    293: "K League 2",
     169: "Chinese Super League",
+    170: "China League One",
     188: "A-League",
+    323: "Indian Super League",
+    296: "Thai League 1",
+    313: "Liga 1 ID",
+    288: "Premier Soccer League ZA",
+    233: "Egyptian Premier League",
+    200: "Botola Pro MA",
+    201: "Ligue Pro TN",
     2: "Champions League",
     3: "Europa League",
     848: "Conference League",
+    1: "World Cup",
+    9: "World Cup Qualification",
 }
 
 TURKISH_TEAMS = {
@@ -159,7 +220,7 @@ def get_fixtures_by_team(team_id, last=15, venue=None):
     return matches
 
 
-def get_h2h(id1, id2, last=8):
+def get_h2h(id1, id2, last=4):
     r = safe_request(f"{API_URL}/fixtures/headtohead?h2h={id1}-{id2}&last={last}")
     if not r:
         return []
@@ -201,6 +262,25 @@ def get_standings_form(team_id, league_id, season):
                 if team["team"]["id"] == team_id:
                     return team["rank"], team.get("form", "")
     return None, None
+
+
+def get_season_btts(team_id, league_id, season):
+    if not league_id or not season:
+        return None
+    r = safe_request(f"{API_URL}/fixtures?team={team_id}&league={league_id}&season={season}&status=FT")
+    if not r:
+        return None
+    matches = []
+    for m in r.get("response", []):
+        gh = m["goals"]["home"]
+        ga = m["goals"]["away"]
+        if gh is None or ga is None:
+            continue
+        matches.append((gh, ga))
+    if len(matches) < 5:
+        return None
+    btts = sum(1 for gh, ga in matches if gh > 0 and ga > 0)
+    return btts / len(matches)
 
 
 def poisson_prob(lam, k):
@@ -293,7 +373,7 @@ def analyze_teams(id1, name1, id2, name2):
     home_at_home = get_fixtures_by_team(id1, last=20, venue="home")[:10]
     away_general = get_fixtures_by_team(id2, last=15)
     away_at_away = get_fixtures_by_team(id2, last=20, venue="away")[:10]
-    h2h          = get_h2h(id1, id2, last=8)
+    h2h          = get_h2h(id1, id2, last=4)
 
     if not home_general or not away_general:
         return None
@@ -304,6 +384,9 @@ def analyze_teams(id1, name1, id2, name2):
     stats2 = get_team_statistics(id2, league_id2, season2) if league_id2 else None
     rank1, form1 = get_standings_form(id1, league_id1, season1) if league_id1 else (None, None)
     rank2, form2 = get_standings_form(id2, league_id2, season2) if league_id2 else (None, None)
+
+    season_btts1 = get_season_btts(id1, league_id1, season1)
+    season_btts2 = get_season_btts(id2, league_id2, season2)
 
     avg1, _ = get_league_avg(stats1)
     avg2, _ = get_league_avg(stats2)
@@ -325,9 +408,18 @@ def analyze_teams(id1, name1, id2, name2):
     btts_home_hist = calc_weighted_btts_historical(home_at_home or home_general)
     btts_away_hist = calc_weighted_btts_historical(away_at_away or away_general)
     btts_h2h_hist  = calc_weighted_btts_historical(h2h) if h2h else None
+
     historical_btts = (btts_home_hist + btts_away_hist) / 2
     if btts_h2h_hist is not None:
         historical_btts = historical_btts * 0.6 + btts_h2h_hist * 0.4
+
+    if season_btts1 is not None and season_btts2 is not None:
+        season_avg = (season_btts1 + season_btts2) / 2
+        historical_btts = historical_btts * 0.50 + season_avg * 0.50
+    elif season_btts1 is not None:
+        historical_btts = historical_btts * 0.70 + season_btts1 * 0.30
+    elif season_btts2 is not None:
+        historical_btts = historical_btts * 0.70 + season_btts2 * 0.30
 
     poisson_btts = dixon_coles_btts(lambda_home, lambda_away)
     mc_btts      = monte_carlo_btts(lambda_home, lambda_away, 10000)
@@ -359,6 +451,8 @@ def analyze_teams(id1, name1, id2, name2):
         "hist":    int(historical_btts * 100),
         "poisson": int(poisson_btts * 100),
         "mc":      int(mc_btts * 100),
+        "s1": int(season_btts1 * 100) if season_btts1 is not None else None,
+        "s2": int(season_btts2 * 100) if season_btts2 is not None else None,
     }
     analysis_cache[key] = {"data": result, "time": now}
     return result
@@ -488,8 +582,6 @@ async def send_daily_combine(app):
             print("Combine error:", e)
 
 
-# ===== HANDLERS =====
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text(
@@ -574,6 +666,14 @@ async def get_away(update: Update, context: ContextTypes.DEFAULT_TYPE):
     icon   = "✅" if prob >= 50 else "⛔️"
     status = "BTTS YES" if prob >= 50 else "BTTS NO"
 
+    season_line = ""
+    if result.get("s1") is not None and result.get("s2") is not None:
+        season_line = f"📅 Season KG%: {result['s1']}% / {result['s2']}%\n"
+    elif result.get("s1") is not None:
+        season_line = f"📅 Season KG%: {result['s1']}%\n"
+    elif result.get("s2") is not None:
+        season_line = f"📅 Season KG%: {result['s2']}%\n"
+
     report = (
         "📊 MATCH ANALYSIS\n\n"
         f"🏳 {result['h']}\n"
@@ -581,7 +681,8 @@ async def get_away(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚽ xG Home: {result['lh']}  |  Away: {result['la']}\n\n"
         f"📈 Historical:  {result['hist']}%\n"
         f"📐 Poisson/DC:  {result['poisson']}%\n"
-        f"🎲 Monte Carlo: {result['mc']}%\n\n"
+        f"🎲 Monte Carlo: {result['mc']}%\n"
+        f"{season_line}\n"
         f"{icon} {status}\n"
         f"🎯 Final: {prob}%\n\n"
         "➡️ /analyze for new analysis\n"
