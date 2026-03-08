@@ -1,3 +1,5 @@
+Haklısın, her zaman geçerli. Full kod:
+
 import requests
 import time
 import math
@@ -221,10 +223,6 @@ def get_fixtures_by_team(team_id, last=15, venue=None):
 
 
 def get_h2h_smart(id1, id2):
-    """
-    Son 10 H2H çek, sadece son 3 yıldan olanları kullan.
-    Eğer son 3 yılda yeterli maç yoksa H2H'ı tamamen atla.
-    """
     r = safe_request(f"{API_URL}/fixtures/headtohead?h2h={id1}-{id2}&last=10")
     if not r:
         return [], 0, 0
@@ -240,7 +238,9 @@ def get_h2h_smart(id1, id2):
             continue
         total_found += 1
         try:
-            match_date = datetime.fromisoformat(m["fixture"]["date"].replace("Z", "+00:00"))
+            match_date = datetime.fromisoformat(
+                m["fixture"]["date"].replace("Z", "+00:00")
+            )
             if match_date >= cutoff_3y:
                 recent_matches.append((gh, ga))
         except:
@@ -252,7 +252,9 @@ def get_h2h_smart(id1, id2):
 def get_team_league(team_id):
     current_year = datetime.now().year
     for season in [current_year, current_year - 1]:
-        r = safe_request(f"{API_URL}/leagues?team={team_id}&season={season}&current=true")
+        r = safe_request(
+            f"{API_URL}/leagues?team={team_id}&season={season}&current=true"
+        )
         if r and r.get("response"):
             for league in r["response"]:
                 if league["league"]["type"] == "League":
@@ -261,7 +263,9 @@ def get_team_league(team_id):
 
 
 def get_team_statistics(team_id, league_id, season):
-    r = safe_request(f"{API_URL}/teams/statistics?team={team_id}&league={league_id}&season={season}")
+    r = safe_request(
+        f"{API_URL}/teams/statistics?team={team_id}&league={league_id}&season={season}"
+    )
     if not r or not r.get("response"):
         return None
     return r["response"]
@@ -280,22 +284,63 @@ def get_standings_form(team_id, league_id, season):
 
 
 def get_season_btts(team_id, league_id, season):
+    """
+    Her sezon durumuna göre akıllı veri karıştırma:
+    8+ maç  → sadece bu sezon
+    4-7 maç → bu sezon %60 + önceki %40
+    1-3 maç → bu sezon %25 + önceki %75
+    0 maç   → tamamen önceki sezon
+    Sezon ortası/sonu da önceki sezon ağırlığı azalır, bu sezon artar — otomatik.
+    """
     if not league_id or not season:
-        return None, 0, 0
-    r = safe_request(f"{API_URL}/fixtures?team={team_id}&league={league_id}&season={season}&status=FT")
-    if not r:
-        return None, 0, 0
-    matches = []
-    for m in r.get("response", []):
-        gh = m["goals"]["home"]
-        ga = m["goals"]["away"]
-        if gh is None or ga is None:
-            continue
-        matches.append((gh, ga))
-    if len(matches) < 5:
-        return None, 0, len(matches)
-    btts_count = sum(1 for gh, ga in matches if gh > 0 and ga > 0)
-    return btts_count / len(matches), btts_count, len(matches)
+        return None, 0, 0, ""
+
+    def fetch(s):
+        r = safe_request(
+            f"{API_URL}/fixtures?team={team_id}&league={league_id}&season={s}&status=FT"
+        )
+        if not r:
+            return 0, 0
+        btts, total = 0, 0
+        for m in r.get("response", []):
+            gh = m["goals"]["home"]
+            ga = m["goals"]["away"]
+            if gh is None or ga is None:
+                continue
+            total += 1
+            if gh > 0 and ga > 0:
+                btts += 1
+        return btts, total
+
+    curr_btts, curr_total = fetch(season)
+    prev_btts, prev_total = fetch(season - 1)
+
+    curr_rate = curr_btts / curr_total if curr_total > 0 else None
+    prev_rate = prev_btts / prev_total if prev_total >= 5 else None
+
+    if curr_total >= 8:
+        # Yeterli veri — sadece bu sezon
+        rate = curr_rate
+        label = f"{curr_btts}/{curr_total}"
+    elif curr_total >= 4 and prev_rate is not None:
+        # Az veri — ikisini karıştır
+        rate = curr_rate * 0.60 + prev_rate * 0.40
+        label = f"{curr_btts}/{curr_total}+prev"
+    elif curr_total >= 1 and prev_rate is not None:
+        # Çok az veri — önceki sezon ağırlıklı
+        rate = curr_rate * 0.25 + prev_rate * 0.75
+        label = f"{curr_btts}/{curr_total}+prev"
+    elif prev_rate is not None:
+        # Hiç veri yok — tamamen önceki sezon
+        rate = prev_rate
+        label = f"prev({prev_btts}/{prev_total})"
+    elif curr_rate is not None and curr_total >= 3:
+        rate = curr_rate
+        label = f"{curr_btts}/{curr_total}"
+    else:
+        return None, 0, 0, ""
+
+    return rate, curr_btts, curr_total, label
 
 
 def poisson_prob(lam, k):
@@ -320,9 +365,11 @@ def dixon_coles_btts(lh, la, max_goals=8):
     btts = 0.0
     for h in range(1, max_goals + 1):
         for a in range(1, max_goals + 1):
-            btts += (poisson_prob(lh, h) *
-                     poisson_prob(la, a) *
-                     dixon_coles_correction(h, a, lh, la))
+            btts += (
+                poisson_prob(lh, h)
+                * poisson_prob(la, a)
+                * dixon_coles_correction(h, a, lh, la)
+            )
     return btts
 
 
@@ -339,7 +386,8 @@ def poisson_random(lam):
 
 def monte_carlo_btts(lh, la, simulations=10000):
     return sum(
-        1 for _ in range(simulations)
+        1
+        for _ in range(simulations)
         if poisson_random(lh) > 0 and poisson_random(la) > 0
     ) / simulations
 
@@ -356,11 +404,9 @@ def calc_weighted_avg(values, decay=0.85):
 
 
 def calc_btts_stats(matches):
-    """BTTS istatistikleri — ağırlıklı oran + ham sayı"""
     if not matches:
         return 0.5, 0, 0
-    total_w, btts_w = 0, 0
-    btts_count = 0
+    total_w, btts_w, btts_count = 0, 0, 0
     for i, (gh, ga) in enumerate(matches):
         w = i + 1
         total_w += w
@@ -374,8 +420,10 @@ def get_league_avg(stats):
     if not stats:
         return 1.35, 1.35
     try:
-        return (float(stats["goals"]["for"]["average"]["total"]),
-                float(stats["goals"]["against"]["average"]["total"]))
+        return (
+            float(stats["goals"]["for"]["average"]["total"]),
+            float(stats["goals"]["against"]["average"]["total"]),
+        )
     except:
         return 1.35, 1.35
 
@@ -387,7 +435,6 @@ def analyze_teams(id1, name1, id2, name2):
         if now - analysis_cache[key]["time"] < CACHE_TIME:
             return analysis_cache[key]["data"]
 
-    # Maç verileri
     home_general = get_fixtures_by_team(id1, last=10)
     home_at_home = get_fixtures_by_team(id1, last=20, venue="home")[:10]
     away_general = get_fixtures_by_team(id2, last=10)
@@ -396,22 +443,26 @@ def analyze_teams(id1, name1, id2, name2):
     if not home_general or not away_general:
         return None
 
-    # H2H — sadece son 3 yıl
     h2h, h2h_recent_count, h2h_total = get_h2h_smart(id1, id2)
 
-    # Lig & istatistik
     league_id1, season1 = get_team_league(id1)
     league_id2, season2 = get_team_league(id2)
     stats1 = get_team_statistics(id1, league_id1, season1) if league_id1 else None
     stats2 = get_team_statistics(id2, league_id2, season2) if league_id2 else None
-    rank1, form1 = get_standings_form(id1, league_id1, season1) if league_id1 else (None, None)
-    rank2, form2 = get_standings_form(id2, league_id2, season2) if league_id2 else (None, None)
+    rank1, form1 = (
+        get_standings_form(id1, league_id1, season1) if league_id1 else (None, None)
+    )
+    rank2, form2 = (
+        get_standings_form(id2, league_id2, season2) if league_id2 else (None, None)
+    )
 
-    # Sezon KG %
-    season_rate1, season_btts_count1, season_total1 = get_season_btts(id1, league_id1, season1)
-    season_rate2, season_btts_count2, season_total2 = get_season_btts(id2, league_id2, season2)
+    season_rate1, s1_btts, s1_total, s1_label = get_season_btts(
+        id1, league_id1, season1
+    )
+    season_rate2, s2_btts, s2_total, s2_label = get_season_btts(
+        id2, league_id2, season2
+    )
 
-    # Lambda hesapla
     avg1, _ = get_league_avg(stats1)
     avg2, _ = get_league_avg(stats2)
     league_avg = (avg1 + avg2) / 2
@@ -432,30 +483,26 @@ def analyze_teams(id1, name1, id2, name2):
     lambda_home = max(0.2, min(home_attack * away_defense * league_avg * 1.08, 5.0))
     lambda_away = max(0.2, min(away_attack * home_defense * league_avg, 5.0))
 
-    # BTTS istatistikleri — son 10 maç
     home_btts_rate, home_btts_count, home_total = calc_btts_stats(home_general)
     away_btts_rate, away_btts_count, away_total = calc_btts_stats(away_general)
-
-    # Ev/dep spesifik
     home_home_rate, _, _ = calc_btts_stats(home_at_home)
     away_away_rate, _, _ = calc_btts_stats(away_at_away)
 
-    # Historical BTTS
     historical_btts = (
-        home_home_rate * 1.5 +
-        away_away_rate * 1.5 +
-        home_btts_rate * 1.0 +
-        away_btts_rate * 1.0
+        home_home_rate * 1.5
+        + away_away_rate * 1.5
+        + home_btts_rate * 1.0
+        + away_btts_rate * 1.0
     ) / 5.0
 
-    # H2H — sadece son 3 yıl varsa ekle
+    # H2H — sadece son 3 yıl
     h2h_note = ""
     if h2h and h2h_recent_count >= 2:
         h2h_rate, h2h_btts_count, h2h_len = calc_btts_stats(h2h)
         historical_btts = historical_btts * 0.60 + h2h_rate * 0.40
         h2h_note = f"{h2h_btts_count}/{h2h_len}"
     elif h2h_total > 0 and h2h_recent_count == 0:
-        h2h_note = "old"  # Tüm H2H 3 yıldan eski, kullanılmadı
+        h2h_note = "old"
     elif h2h_recent_count == 1:
         h2h_rate, h2h_btts_count, h2h_len = calc_btts_stats(h2h)
         historical_btts = historical_btts * 0.80 + h2h_rate * 0.20
@@ -463,7 +510,7 @@ def analyze_teams(id1, name1, id2, name2):
     else:
         h2h_note = "none"
 
-    # Sezon KG % entegrasyonu
+    # Sezon KG entegrasyonu
     if season_rate1 is not None and season_rate2 is not None:
         season_avg = (season_rate1 + season_rate2) / 2
         historical_btts = historical_btts * 0.50 + season_avg * 0.50
@@ -472,11 +519,9 @@ def analyze_teams(id1, name1, id2, name2):
     elif season_rate2 is not None:
         historical_btts = historical_btts * 0.70 + season_rate2 * 0.30
 
-    # Poisson + Monte Carlo
     poisson_btts = dixon_coles_btts(lambda_home, lambda_away)
-    mc_btts      = monte_carlo_btts(lambda_home, lambda_away, 10000)
+    mc_btts = monte_carlo_btts(lambda_home, lambda_away, 10000)
 
-    # Form bonusu
     form_bonus = 0.0
     for form in [form1, form2]:
         if form:
@@ -484,21 +529,19 @@ def analyze_teams(id1, name1, id2, name2):
             scored = sum(1 for f in last5 if f in ["W", "D"])
             form_bonus += (scored / len(last5) - 0.5) * 0.05
 
-    # Sıralama bonusu
     rank_bonus = 0.0
     if rank1 and rank2:
         avg_rank = (rank1 + rank2) / 2
         rank_bonus = 0.03 if avg_rank <= 5 else (-0.03 if avg_rank > 15 else 0.0)
 
-    # Final
     final = (
-        historical_btts * 0.30 +
-        poisson_btts    * 0.35 +
-        mc_btts         * 0.35
+        historical_btts * 0.30
+        + poisson_btts * 0.35
+        + mc_btts * 0.35
     ) + form_bonus + rank_bonus
     final = max(0.05, min(0.95, final))
 
-    # Güvenilirlik uyarıları
+    # Güvenilirlik
     warnings = []
     if len(home_general) < 5:
         warnings.append("⚠️ Insufficient home team data")
@@ -514,6 +557,10 @@ def analyze_teams(id1, name1, id2, name2):
         warnings.append("⚠️ Very low xG — data may be unreliable")
     if season_rate1 is None or season_rate2 is None:
         warnings.append("⚠️ Season statistics incomplete")
+    if s1_total < 8 and s1_label and "prev" in s1_label:
+        warnings.append(f"⚠️ {name1.split()[0]} season start — mixed data used")
+    if s2_total < 8 and s2_label and "prev" in s2_label:
+        warnings.append(f"⚠️ {name2.split()[0]} season start — mixed data used")
 
     if len(warnings) == 0:
         reliability = "🟢 High"
@@ -530,17 +577,13 @@ def analyze_teams(id1, name1, id2, name2):
         "hist":    int(historical_btts * 100),
         "poisson": int(poisson_btts * 100),
         "mc":      int(mc_btts * 100),
-        # Son 10 maç KG sayısı
         "home_btts": f"{home_btts_count}/{home_total}",
         "away_btts": f"{away_btts_count}/{away_total}",
-        # Sezon KG
         "s1": int(season_rate1 * 100) if season_rate1 is not None else None,
         "s2": int(season_rate2 * 100) if season_rate2 is not None else None,
-        "s1_count": f"{season_btts_count1}/{season_total1}" if season_rate1 is not None else None,
-        "s2_count": f"{season_btts_count2}/{season_total2}" if season_rate2 is not None else None,
-        # H2H
+        "s1_label": s1_label,
+        "s2_label": s2_label,
         "h2h_note": h2h_note,
-        # Güvenilirlik
         "warnings": warnings,
         "reliability": reliability,
     }
@@ -569,7 +612,9 @@ def get_todays_fixtures():
 
     for league_id, league_name in MAJOR_LEAGUES.items():
         for season in [current_year, current_year - 1]:
-            r = safe_request(f"{API_URL}/fixtures?date={today}&league={league_id}&season={season}")
+            r = safe_request(
+                f"{API_URL}/fixtures?date={today}&league={league_id}&season={season}"
+            )
             if not r:
                 continue
             matches = r.get("response", [])
@@ -579,7 +624,9 @@ def get_todays_fixtures():
                 if m["fixture"]["status"]["short"] not in ["NS", "TBD"]:
                     continue
                 try:
-                    ko = datetime.fromisoformat(m["fixture"]["date"].replace("Z", "+00:00"))
+                    ko = datetime.fromisoformat(
+                        m["fixture"]["date"].replace("Z", "+00:00")
+                    )
                     if ko - now_utc < timedelta(hours=2):
                         continue
                 except:
@@ -608,11 +655,13 @@ def build_daily_combine():
         try:
             result = analyze_teams(
                 fix["home_id"], fix["home_name"],
-                fix["away_id"], fix["away_name"]
+                fix["away_id"], fix["away_name"],
             )
-            if (result and
-                result["p"] >= COMBINE_THRESHOLD and
-                result["reliability"] != "🔴 Low — treat with caution"):
+            if (
+                result
+                and result["p"] >= COMBINE_THRESHOLD
+                and result["reliability"] != "🔴 Low — treat with caution"
+            ):
                 qualified.append({**fix, **result})
             time.sleep(0.2)
         except:
@@ -666,10 +715,12 @@ async def send_daily_combine(app):
             if not combine:
                 await app.bot.send_message(
                     chat_id=ADMIN_ID,
-                    text="📋 Daily Combine\n\n❌ No matches found with %68+ confidence today."
+                    text="📋 Daily Combine\n\n❌ No matches found with %68+ confidence today.",
                 )
             else:
-                await app.bot.send_message(chat_id=ADMIN_ID, text=format_combine(combine))
+                await app.bot.send_message(
+                    chat_id=ADMIN_ID, text=format_combine(combine)
+                )
         except Exception as e:
             print("Combine error:", e)
 
@@ -697,8 +748,7 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     bot_active = False
     await update.message.reply_text(
-        "🔴 Bot paused. API requests stopped.\n\n"
-        "Use /analyze to resume."
+        "🔴 Bot paused. API requests stopped.\n\nUse /analyze to resume."
     )
 
 
@@ -706,11 +756,15 @@ async def combine_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔️ Access Denied.")
         return
-    wait = await update.message.reply_text("🛜 Scanning today's matches... This may take a minute.")
+    wait = await update.message.reply_text(
+        "🛜 Scanning today's matches... This may take a minute."
+    )
     try:
         combine = build_daily_combine()
         if not combine:
-            await wait.edit_text("❌ No matches found with %68+ confidence today.")
+            await wait.edit_text(
+                "❌ No matches found with %68+ confidence today."
+            )
             return
         await wait.edit_text(format_combine(combine))
     except Exception as e:
@@ -730,7 +784,9 @@ async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def get_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_active:
-        await update.message.reply_text("🔴 Bot is paused. Use /analyze to resume.")
+        await update.message.reply_text(
+            "🔴 Bot is paused. Use /analyze to resume."
+        )
         return ConversationHandler.END
     context.user_data["t1"] = update.message.text
     await update.message.reply_text("🚩 Away Team Name:")
@@ -739,7 +795,9 @@ async def get_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def get_away(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_active:
-        await update.message.reply_text("🔴 Bot is paused. Use /analyze to resume.")
+        await update.message.reply_text(
+            "🔴 Bot is paused. Use /analyze to resume."
+        )
         return ConversationHandler.END
 
     t1 = context.user_data.get("t1", "")
@@ -749,7 +807,9 @@ async def get_away(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = get_match_analysis(t1, t2)
 
     if "error" in result:
-        await wait.edit_text(f"❌ {result['error']}\n\n➡️ /analyze to try again.")
+        await wait.edit_text(
+            f"❌ {result['error']}\n\n➡️ /analyze to try again."
+        )
         return ConversationHandler.END
 
     await wait.delete()
@@ -759,20 +819,21 @@ async def get_away(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = "BTTS YES" if prob >= 50 else "BTTS NO"
 
     # Sezon KG satırı
-    season_line = ""
+    h_name = result["h"].split()[0]
+    a_name = result["a"].split()[0]
     if result.get("s1") is not None and result.get("s2") is not None:
         season_line = (
-            f"📅 Season KG: {result['h'].split()[0]} {result['s1']}% "
-            f"({result['s1_count']})  |  "
-            f"{result['a'].split()[0]} {result['s2']}% ({result['s2_count']})\n"
+            f"📅 Season KG: {h_name} {result['s1']}% ({result['s1_label']})"
+            f"  |  {a_name} {result['s2']}% ({result['s2_label']})\n"
         )
     elif result.get("s1") is not None:
-        season_line = f"📅 Season KG: {result['h'].split()[0]} {result['s1']}% ({result['s1_count']})\n"
+        season_line = f"📅 Season KG: {h_name} {result['s1']}% ({result['s1_label']})\n"
     elif result.get("s2") is not None:
-        season_line = f"📅 Season KG: {result['a'].split()[0]} {result['s2']}% ({result['s2_count']})\n"
+        season_line = f"📅 Season KG: {a_name} {result['s2']}% ({result['s2_label']})\n"
+    else:
+        season_line = ""
 
-    # H2H notu
-    h2h_line = ""
+    # H2H satırı
     if result["h2h_note"] == "old":
         h2h_line = "🕐 H2H: Only old data (3+ years) — not used\n"
     elif result["h2h_note"] == "none":
@@ -821,7 +882,12 @@ async def post_init(app):
 def run_bot():
     while True:
         try:
-            app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+            app = (
+                Application.builder()
+                .token(BOT_TOKEN)
+                .post_init(post_init)
+                .build()
+            )
 
             conv = ConversationHandler(
                 entry_points=[CommandHandler("analyze", analyze_cmd)],
@@ -829,12 +895,16 @@ def run_bot():
                     HOME_NAME: [
                         CommandHandler("analyze", analyze_cmd),
                         CommandHandler("stop", stop_cmd),
-                        MessageHandler(filters.TEXT & ~filters.COMMAND, get_home),
+                        MessageHandler(
+                            filters.TEXT & ~filters.COMMAND, get_home
+                        ),
                     ],
                     AWAY_NAME: [
                         CommandHandler("analyze", analyze_cmd),
                         CommandHandler("stop", stop_cmd),
-                        MessageHandler(filters.TEXT & ~filters.COMMAND, get_away),
+                        MessageHandler(
+                            filters.TEXT & ~filters.COMMAND, get_away
+                        ),
                     ],
                 },
                 fallbacks=[
@@ -859,3 +929,26 @@ def run_bot():
 
 
 run_bot()
+
+
+Örnek çıktı:
+
+📊 MATCH ANALYSIS
+
+🏳 Arsenal
+🚩 Chelsea
+
+⚽ xG Home: 1.84  |  Away: 1.52
+
+📈 Historical:  63%
+📐 Poisson/DC:  71%
+🎲 Monte Carlo: 69%
+
+⚽ Last 10 BTTS: 🏳 7/10  |  🚩 6/10
+📅 Season KG: Arsenal 61% (14/23)  |  Chelsea 57% (3/4+prev)
+🤝 H2H (last 3y): 3/4 BTTS
+
+📶 Reliability: 🟡 Medium
+
+✅ BTTS YES
+🎯 Final: 68%
