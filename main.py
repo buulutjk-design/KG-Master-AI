@@ -1,23 +1,23 @@
 import requests
-import math
 import time
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
-# ===== CONFIG =====
+# ===== SETTINGS =====
 BOT_TOKEN = "8727632778:AAEbNjZzXfS8GHLIoDtoJHAgKMxL4P6y_go"
 ADMIN_ID = 8480843841
 API_KEY = "2180b95ef16955595f12d9f9cdebcd74"
+
 API_URL = "https://v3.football.api-sports.io"
 
 HOME_NAME, AWAY_NAME = range(2)
 
 # ===== CACHE =====
 analysis_cache = {}
-CACHE_TIME = 43200  # 12 saat
+CACHE_TIME = 43200
 
-# ===== API REQUEST =====
+# ===== SAFE REQUEST =====
 def safe_request(url):
 
     headers = {
@@ -40,22 +40,6 @@ def safe_request(url):
     return None
 
 
-# ===== TEAM ID =====
-def get_team_id(name):
-
-    r = safe_request(f"{API_URL}/teams?search={name}")
-
-    if not r:
-        return None
-
-    data = r.get("response")
-
-    if data:
-        return data[0]["team"]["id"]
-
-    return None
-
-
 # ===== ANALYSIS =====
 def get_match_analysis(team1, team2):
 
@@ -70,36 +54,49 @@ def get_match_analysis(team1, team2):
         if now - cached["time"] < CACHE_TIME:
             return cached["data"]
 
-    team_id = get_team_id(team1)
-
-    if not team_id:
-        return None
-
-    r = safe_request(f"{API_URL}/fixtures?team={team_id}&last=10")
+    # son 50 maç çek
+    r = safe_request(f"{API_URL}/fixtures?last=50")
 
     if not r:
         return None
 
     matches = r.get("response", [])
 
-    if not matches:
+    team1_l = team1.lower()
+    team2_l = team2.lower()
+
+    filtered = []
+
+    for m in matches:
+
+        home = m["teams"]["home"]["name"].lower()
+        away = m["teams"]["away"]["name"].lower()
+
+        if team1_l in home or team1_l in away or team2_l in home or team2_l in away:
+
+            gh = m["goals"]["home"]
+            ga = m["goals"]["away"]
+
+            if gh is None or ga is None:
+                continue
+
+            filtered.append((gh, ga))
+
+    if not filtered:
         return None
 
     btts = 0
 
-    for m in matches:
+    for gh, ga in filtered:
 
-        gh = m["goals"]["home"]
-        ga = m["goals"]["away"]
-
-        if gh and ga and gh > 0 and ga > 0:
+        if gh > 0 and ga > 0:
             btts += 1
 
-    prob = int((btts / len(matches)) * 100)
+    prob = int((btts / len(filtered)) * 100)
 
     result = {
-        "h": team1,
-        "a": team2,
+        "h": team1.title(),
+        "a": team2.title(),
         "p": prob
     }
 
@@ -169,7 +166,7 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ===== RUN =====
+# ===== RUN BOT =====
 def run_bot():
 
     while True:
