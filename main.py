@@ -2,7 +2,7 @@ import requests
 import time
 import math
 import random
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
 import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
@@ -380,6 +380,7 @@ def get_match_analysis(team1, team2):
 def get_todays_fixtures():
     today = date.today().strftime("%Y-%m-%d")
     current_year = datetime.now().year
+    now_utc = datetime.now(timezone.utc)
     all_fixtures = []
 
     for league_id, league_name in MAJOR_LEAGUES.items():
@@ -393,6 +394,12 @@ def get_todays_fixtures():
             for m in matches:
                 if m["fixture"]["status"]["short"] not in ["NS", "TBD"]:
                     continue
+                try:
+                    ko = datetime.fromisoformat(m["fixture"]["date"].replace("Z", "+00:00"))
+                    if ko - now_utc < timedelta(hours=2):
+                        continue
+                except:
+                    pass
                 all_fixtures.append({
                     "league":    league_name,
                     "home_id":   m["teams"]["home"]["id"],
@@ -462,7 +469,6 @@ async def send_daily_combine(app):
         now = datetime.now()
         target = now.replace(hour=COMBINE_HOUR, minute=0, second=0, microsecond=0)
         if now >= target:
-            from datetime import timedelta
             target += timedelta(days=1)
         await asyncio.sleep((target - now).total_seconds())
 
