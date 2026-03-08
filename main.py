@@ -17,24 +17,60 @@ analysis_cache = {}
 CACHE_TIME = 43200
 bot_active = True
 
-# Tüm büyük ligler
+COMBINE_THRESHOLD = 68
+COMBINE_HOUR = 9
+
 MAJOR_LEAGUES = {
-    39:  "Premier League",
+    39: "Premier League",
+    40: "Championship",
+    41: "League One",
+    45: "FA Cup",
+    48: "League Cup",
     140: "La Liga",
+    141: "Segunda Division",
     135: "Serie A",
-    78:  "Bundesliga",
-    61:  "Ligue 1",
+    136: "Serie B",
+    78: "Bundesliga",
+    79: "2. Bundesliga",
+    61: "Ligue 1",
+    62: "Ligue 2",
     203: "Süper Lig",
-    88:  "Eredivisie",
-    94:  "Primeira Liga",
+    204: "1. Lig",
+    88: "Eredivisie",
+    89: "Eerste Divisie",
+    94: "Primeira Liga",
+    95: "Segunda Liga",
     144: "Jupiler Pro League",
     179: "Scottish Premiership",
+    180: "Scottish Championship",
+    235: "Premier League RU",
+    218: "Bundesliga AT",
+    207: "Super League CH",
+    197: "Super League GR",
+    345: "Czech Liga",
+    106: "Ekstraklasa",
+    283: "Liga 1 RO",
+    210: "HNL",
+    286: "Super Liga RS",
+    119: "Superliga DK",
+    103: "Eliteserien",
+    113: "Allsvenskan",
+    244: "Veikkausliiga",
+    333: "Premier League UA",
     307: "Saudi Pro League",
     253: "MLS",
+    71: "Serie A BR",
+    72: "Serie B BR",
+    128: "Liga Profesional",
+    262: "Liga MX",
+    98: "J1 League",
+    292: "K League 1",
+    169: "Chinese Super League",
+    188: "A-League",
+    2: "Champions League",
+    3: "Europa League",
+    848: "Conference League",
 }
-
-COMBINE_THRESHOLD = 70  # %70+
-COMBINE_HOUR = 9        # Sabah 09:00
 
 TURKISH_TEAMS = {
     "galatasaray": "Galatasaray",
@@ -53,6 +89,7 @@ TURKISH_TEAMS = {
     "alanyaspor": "Alanyaspor",
     "kayserispor": "Kayserispor",
     "gaziantep": "Gaziantep FK",
+    "gaziantep fk": "Gaziantep FK",
     "adana demirspor": "Adana Demirspor",
     "adana": "Adana Demirspor",
     "rizespor": "Rizespor",
@@ -239,14 +276,13 @@ def get_league_avg(stats):
     if not stats:
         return 1.35, 1.35
     try:
-        return float(stats["goals"]["for"]["average"]["total"]), \
-               float(stats["goals"]["against"]["average"]["total"])
+        return (float(stats["goals"]["for"]["average"]["total"]),
+                float(stats["goals"]["against"]["average"]["total"]))
     except:
         return 1.35, 1.35
 
 
 def analyze_teams(id1, name1, id2, name2):
-    """İki takım ID'si ile direkt analiz — kombine için"""
     key = f"{name1.lower()}_{name2.lower()}"
     now = datetime.now().timestamp()
     if key in analysis_cache:
@@ -314,13 +350,16 @@ def analyze_teams(id1, name1, id2, name2):
         mc_btts         * 0.35
     ) + form_bonus + rank_bonus
     final = max(0.05, min(0.95, final))
-    prob  = int(final * 100)
 
-    result = {"h": name1, "a": name2, "p": prob,
-              "lh": round(lambda_home, 2), "la": round(lambda_away, 2),
-              "hist": int(historical_btts * 100),
-              "poisson": int(poisson_btts * 100),
-              "mc": int(mc_btts * 100)}
+    result = {
+        "h": name1, "a": name2,
+        "p": int(final * 100),
+        "lh": round(lambda_home, 2),
+        "la": round(lambda_away, 2),
+        "hist":    int(historical_btts * 100),
+        "poisson": int(poisson_btts * 100),
+        "mc":      int(mc_btts * 100),
+    }
     analysis_cache[key] = {"data": result, "time": now}
     return result
 
@@ -338,49 +377,42 @@ def get_match_analysis(team1, team2):
     return result
 
 
-# =============================================
-# OTOMATİK KOMBİNE SİSTEMİ
-# =============================================
-
 def get_todays_fixtures():
-    """Bugünkü tüm büyük lig maçlarını çek"""
     today = date.today().strftime("%Y-%m-%d")
+    current_year = datetime.now().year
     all_fixtures = []
 
     for league_id, league_name in MAJOR_LEAGUES.items():
-        r = safe_request(f"{API_URL}/fixtures?date={today}&league={league_id}&season=2024")
-        if not r:
-            continue
-        for m in r.get("response", []):
-            status = m["fixture"]["status"]["short"]
-            if status not in ["NS", "TBD"]:  # Sadece başlamamış maçlar
+        for season in [current_year, current_year - 1]:
+            r = safe_request(f"{API_URL}/fixtures?date={today}&league={league_id}&season={season}")
+            if not r:
                 continue
-            home_id   = m["teams"]["home"]["id"]
-            home_name = m["teams"]["home"]["name"]
-            away_id   = m["teams"]["away"]["id"]
-            away_name = m["teams"]["away"]["name"]
-            kickoff   = m["fixture"]["date"]
-            all_fixtures.append({
-                "league": league_name,
-                "home_id": home_id,
-                "home_name": home_name,
-                "away_id": away_id,
-                "away_name": away_name,
-                "kickoff": kickoff,
-            })
-        time.sleep(0.3)  # Rate limit
+            matches = r.get("response", [])
+            if not matches:
+                continue
+            for m in matches:
+                if m["fixture"]["status"]["short"] not in ["NS", "TBD"]:
+                    continue
+                all_fixtures.append({
+                    "league":    league_name,
+                    "home_id":   m["teams"]["home"]["id"],
+                    "home_name": m["teams"]["home"]["name"],
+                    "away_id":   m["teams"]["away"]["id"],
+                    "away_name": m["teams"]["away"]["name"],
+                    "kickoff":   m["fixture"]["date"],
+                })
+            break
+        time.sleep(0.3)
 
     return all_fixtures
 
 
 def build_daily_combine():
-    """Günlük kombine oluştur"""
     fixtures = get_todays_fixtures()
     if not fixtures:
         return None
 
     qualified = []
-
     for fix in fixtures:
         try:
             result = analyze_teams(
@@ -396,75 +428,61 @@ def build_daily_combine():
     if not qualified:
         return None
 
-    # En yüksek % olan 3 maçı seç
     qualified.sort(key=lambda x: x["p"], reverse=True)
-    top3 = qualified[:3]
+    return qualified[:3]
 
-    return top3
+
+def format_combine(combine):
+    combine_prob = 1.0
+    for m in combine:
+        combine_prob *= m["p"] / 100
+
+    lines = ["🎯 DAILY BTTS COMBINE\n"]
+    lines.append(f"📅 {date.today().strftime('%d.%m.%Y')}\n")
+
+    for i, m in enumerate(combine, 1):
+        try:
+            ko = datetime.fromisoformat(m["kickoff"].replace("Z", "+00:00"))
+            ko_str = ko.strftime("%H:%M")
+        except:
+            ko_str = "?"
+        lines.append(
+            f"{i}. {m['league']}\n"
+            f"   🏳 {m['h']} vs 🚩 {m['a']}\n"
+            f"   ⏰ {ko_str}  |  ✅ BTTS YES  |  🎯 {m['p']}%\n"
+        )
+
+    lines.append(f"\n📊 Combine Win Probability: {int(combine_prob * 100)}%")
+    lines.append("⚠️ Always bet responsibly.")
+    return "\n".join(lines)
 
 
 async def send_daily_combine(app):
-    """Sabah 09:00'da kombine gönder"""
     while True:
         now = datetime.now()
-        # Bugün saat 09:00'ı hesapla
         target = now.replace(hour=COMBINE_HOUR, minute=0, second=0, microsecond=0)
         if now >= target:
-            # Yarın 09:00
-            target = target.replace(day=target.day + 1)
-
-        wait_seconds = (target - now).total_seconds()
-        await asyncio.sleep(wait_seconds)
+            from datetime import timedelta
+            target += timedelta(days=1)
+        await asyncio.sleep((target - now).total_seconds())
 
         if not bot_active:
             continue
 
         try:
             combine = build_daily_combine()
-
             if not combine:
                 await app.bot.send_message(
                     chat_id=ADMIN_ID,
-                    text="📋 Daily Combine\n\n❌ No matches found with %70+ confidence today."
+                    text="📋 Daily Combine\n\n❌ No matches found with %68+ confidence today."
                 )
-                continue
-
-            combine_prob = 1.0
-            for m in combine:
-                combine_prob *= m["p"] / 100
-
-            lines = ["🎯 DAILY BTTS COMBINE\n"]
-            lines.append(f"📅 {date.today().strftime('%d.%m.%Y')}\n")
-
-            for i, m in enumerate(combine, 1):
-                # Saat dilimi düzenle
-                try:
-                    ko = datetime.fromisoformat(m["kickoff"].replace("Z", "+00:00"))
-                    ko_str = ko.strftime("%H:%M")
-                except:
-                    ko_str = "?"
-
-                lines.append(
-                    f"{i}. {m['league']}\n"
-                    f"   🏳 {m['h']} vs 🚩 {m['a']}\n"
-                    f"   ⏰ {ko_str}  |  ✅ BTTS YES  |  🎯 {m['p']}%\n"
-                )
-
-            lines.append(f"\n📊 Combine Win Probability: {int(combine_prob * 100)}%")
-            lines.append("⚠️ Always bet responsibly.")
-
-            await app.bot.send_message(
-                chat_id=ADMIN_ID,
-                text="\n".join(lines)
-            )
-
+            else:
+                await app.bot.send_message(chat_id=ADMIN_ID, text=format_combine(combine))
         except Exception as e:
             print("Combine error:", e)
 
 
-# =============================================
-# TELEGRAM HANDLERS
-# =============================================
+# ===== HANDLERS =====
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -495,45 +513,16 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def combine_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manuel kombine komutu"""
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔️ Access Denied.")
         return
-
     wait = await update.message.reply_text("🛜 Scanning today's matches... This may take a minute.")
-
     try:
         combine = build_daily_combine()
-
         if not combine:
-            await wait.edit_text("❌ No matches found with %70+ confidence today.")
+            await wait.edit_text("❌ No matches found with %68+ confidence today.")
             return
-
-        combine_prob = 1.0
-        for m in combine:
-            combine_prob *= m["p"] / 100
-
-        lines = ["🎯 DAILY BTTS COMBINE\n"]
-        lines.append(f"📅 {date.today().strftime('%d.%m.%Y')}\n")
-
-        for i, m in enumerate(combine, 1):
-            try:
-                ko = datetime.fromisoformat(m["kickoff"].replace("Z", "+00:00"))
-                ko_str = ko.strftime("%H:%M")
-            except:
-                ko_str = "?"
-
-            lines.append(
-                f"{i}. {m['league']}\n"
-                f"   🏳 {m['h']} vs 🚩 {m['a']}\n"
-                f"   ⏰ {ko_str}  |  ✅ BTTS YES  |  🎯 {m['p']}%\n"
-            )
-
-        lines.append(f"\n📊 Combine Win Probability: {int(combine_prob * 100)}%")
-        lines.append("⚠️ Always bet responsibly.")
-
-        await wait.edit_text("\n".join(lines))
-
+        await wait.edit_text(format_combine(combine))
     except Exception as e:
         await wait.edit_text(f"❌ Error: {e}")
 
@@ -559,7 +548,6 @@ async def get_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def get_away(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global bot_active
     if not bot_active:
         await update.message.reply_text("🔴 Bot is paused. Use /analyze to resume.")
         return ConversationHandler.END
