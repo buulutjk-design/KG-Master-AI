@@ -3,60 +3,329 @@ import time
 import math
 import random
 from datetime import datetime, date, timezone, timedelta
+from collections import defaultdict
 import asyncio
+import json
+import os
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
-BOT_TOKEN = "8727632778:AAEbNjZzXfS8GHLIoDtoJHAgKMxL4P6y_go"
+BOT_TOKEN = "8732987460:AAHJb_1TkA5cFYSgGc-Jq09Z8URJN_eQOko"
 ADMIN_ID = 8480843841
 API_KEY = "7d7e4508cb4cfe8006ccc9422bb28b1d"
 API_URL = "https://v3.football.api-sports.io"
 
 HOME_NAME, AWAY_NAME = range(2)
-DATE_INPUT = 2
-
 analysis_cache = {}
 CACHE_TIME = 43200
 bot_active = True
+VIP_FILE = "vip_users.json"
+shown_auto = set()
 
-COMBINE_THRESHOLD = 65
-COMBINE_HOUR = 9
+# ── VIP ───────────────────────────────────────────────────────
+def load_vip():
+    if os.path.exists(VIP_FILE):
+        with open(VIP_FILE, "r") as f:
+            return json.load(f)
+    return {}
 
-shown_matches = set()
+def save_vip(data):
+    with open(VIP_FILE, "w") as f:
+        json.dump(data, f)
 
+def add_vip(user_id, days=7):
+    data = load_vip()
+    data[str(user_id)] = (datetime.now() + timedelta(days=days)).isoformat()
+    save_vip(data)
+
+def remove_vip(user_id):
+    data = load_vip()
+    data.pop(str(user_id), None)
+    save_vip(data)
+
+def is_vip(user_id):
+    if user_id == ADMIN_ID:
+        return True
+    data = load_vip()
+    uid = str(user_id)
+    if uid not in data:
+        return False
+    return datetime.now() < datetime.fromisoformat(data[uid])
+
+def get_expired_vips():
+    data = load_vip()
+    return [uid for uid, exp in data.items() if datetime.now() >= datetime.fromisoformat(exp)]
+
+def get_all_vips():
+    data = load_vip()
+    result = []
+    for uid, exp in data.items():
+        expires = datetime.fromisoformat(exp)
+        kalan = (expires - datetime.now()).days
+        durum = "✅ Aktif" if datetime.now() < expires else "❌ Süresi Doldu"
+        result.append((uid, exp, kalan, durum))
+    return result
+
+# ── TÜM DÜNYA LİGLERİ ─────────────────────────────────────────
 MAJOR_LEAGUES = {
-    39: "Premier League", 40: "Championship", 41: "League One", 42: "League Two",
-    45: "FA Cup", 48: "League Cup", 140: "La Liga", 141: "Segunda Division",
-    142: "Copa del Rey", 135: "Serie A", 136: "Serie B", 137: "Coppa Italia",
+    # İNGİLTERE
+    39: "Premier League", 40: "Championship", 41: "League One",
+    42: "League Two", 43: "National League", 45: "FA Cup", 48: "League Cup",
+    49: "Non League", 51: "Football League Trophy",
+
+    # İSPANYA
+    140: "La Liga", 141: "Segunda Division", 142: "Copa del Rey", 143: "Primera RFEF",
+
+    # İTALYA
+    135: "Serie A", 136: "Serie B", 137: "Coppa Italia", 138: "Serie C",
+
+    # ALMANYA
     78: "Bundesliga", 79: "2. Bundesliga", 80: "3. Liga", 81: "DFB Pokal",
-    61: "Ligue 1", 62: "Ligue 2", 66: "Coupe de France", 203: "Süper Lig",
-    204: "1. Lig", 205: "2. Lig", 88: "Eredivisie", 89: "Eerste Divisie",
-    94: "Primeira Liga", 95: "Segunda Liga", 144: "Jupiler Pro League",
-    179: "Scottish Premiership", 180: "Scottish Championship", 181: "Scottish League One",
-    235: "Premier League RU", 236: "FNL", 218: "Bundesliga AT", 219: "2. Liga AT",
-    207: "Super League CH", 208: "Challenge League", 197: "Super League GR",
-    198: "Super League 2 GR", 345: "Czech Liga", 346: "Czech FNL",
-    106: "Ekstraklasa", 107: "I Liga PL", 283: "Liga 1 RO", 284: "Liga 2 RO",
-    210: "HNL", 286: "Super Liga RS", 119: "Superliga DK", 120: "1. Division DK",
-    103: "Eliteserien", 104: "1. Division NO", 113: "Allsvenskan", 114: "Superettan",
-    244: "Veikkausliiga", 333: "Premier League UA", 271: "OTP Bank Liga",
-    332: "Super Liga SK", 322: "PrvaLiga", 318: "Premier Liga BIH", 341: "Prva CFL",
-    316: "Kategoria Superiore", 172: "First League BG", 164: "Úrvalsdeild",
-    357: "League of Ireland", 374: "NIFL Premiership", 375: "Cymru Premier",
-    377: "A Lyga", 378: "Virsliga", 379: "Meistriliiga", 380: "Vysshaya Liga",
-    381: "Divizia Nationala", 307: "Saudi Pro League", 435: "UAE Pro League",
-    350: "Stars League QAT", 290: "Persian Gulf Pro League", 384: "Ligat ha'Al",
-    253: "MLS", 262: "Liga MX", 263: "Liga de Expansion MX", 321: "Canadian Premier League",
-    71: "Serie A BR", 72: "Serie B BR", 73: "Serie C BR", 128: "Liga Profesional AR",
-    129: "Primera Nacional AR", 265: "Primera Division CL", 239: "Liga BetPlay CO",
-    268: "Primera Division UY", 267: "Division Profesional PY", 281: "Liga 1 PE",
-    240: "LigaPro EC", 269: "Liga FUTVE", 98: "J1 League", 99: "J2 League",
-    292: "K League 1", 293: "K League 2", 169: "Chinese Super League",
-    170: "China League One", 188: "A-League", 323: "Indian Super League",
-    296: "Thai League 1", 313: "Liga 1 ID", 288: "Premier Soccer League ZA",
-    233: "Egyptian Premier League", 200: "Botola Pro MA", 201: "Ligue Pro TN",
-    2: "Champions League", 3: "Europa League", 848: "Conference League",
-    1: "World Cup", 9: "World Cup Qualification",
+    197: "Regionalliga Bayern",
+
+    # FRANSA
+    61: "Ligue 1", 62: "Ligue 2", 63: "National", 66: "Coupe de France",
+
+    # TÜRKİYE
+    203: "Süper Lig", 204: "1. Lig", 205: "2. Lig", 206: "3. Lig",
+
+    # HOLLANDA
+    88: "Eredivisie", 89: "Eerste Divisie",
+
+    # PORTEKİZ
+    94: "Primeira Liga", 95: "Segunda Liga",
+
+    # BELÇİKA
+    144: "Jupiler Pro League", 145: "Eerste Nationale",
+
+    # İSKOÇYA
+    179: "Scottish Premiership", 180: "Scottish Championship",
+    181: "Scottish League One", 182: "Scottish League Two",
+
+    # RUSYA
+    235: "Premier League RU", 236: "FNL", 237: "PFL",
+
+    # AVUSTURYA
+    218: "Bundesliga AT", 219: "2. Liga AT",
+
+    # İSVİÇRE
+    207: "Super League CH", 208: "Challenge League",
+
+    # YUNANİSTAN
+    197: "Super League GR", 198: "Super League 2 GR",
+
+    # ÇEK CUMHURİYETİ
+    345: "Czech Liga", 346: "Czech FNL",
+
+    # POLONYA
+    106: "Ekstraklasa", 107: "I Liga PL",
+
+    # ROMANYA
+    283: "Liga 1 RO", 284: "Liga 2 RO",
+
+    # HIRVATİSTAN
+    210: "HNL", 211: "HNL 2",
+
+    # SIRBİSTAN
+    286: "Super Liga RS", 287: "Liga 2 RS",
+
+    # DANİMARKA
+    119: "Superliga DK", 120: "1. Division DK",
+
+    # NORVEÇ
+    103: "Eliteserien", 104: "1. Division NO", 105: "2. Division NO",
+
+    # İSVEÇ
+    113: "Allsvenskan", 114: "Superettan", 115: "Division 1",
+
+    # FİNLANDİYA
+    244: "Veikkausliiga", 245: "Ykkönen",
+
+    # UKRAYNA
+    333: "Premier League UA", 334: "Persha Liga UA",
+
+    # MACARİSTAN
+    271: "OTP Bank Liga", 272: "Merkur Liga",
+
+    # SLOVAKYA
+    332: "Super Liga SK",
+
+    # SLOVENYA
+    322: "PrvaLiga",
+
+    # BOSNA HERSEK
+    318: "Premier Liga BIH",
+
+    # KARADAĞ
+    341: "Prva CFL",
+
+    # ARNAVUTLUK
+    316: "Kategoria Superiore",
+
+    # BULGARİSTAN
+    172: "First League BG", 173: "Second League BG",
+
+    # İZLANDA
+    164: "Úrvalsdeild", 165: "1. deild",
+
+    # İRLANDA
+    357: "League of Ireland",
+
+    # KUZEY İRLANDA
+    374: "NIFL Premiership",
+
+    # GALLER
+    375: "Cymru Premier",
+
+    # LİTVANYA
+    377: "A Lyga",
+
+    # LETONYA
+    378: "Virsliga",
+
+    # ESTONYA
+    379: "Meistriliiga",
+
+    # BELARUS
+    380: "Vysshaya Liga",
+
+    # MOLDOVA
+    381: "Divizia Nationala",
+
+    # KUZEY MAKEDONYA
+    383: "Prva Liga MKD",
+
+    # KOSOVA
+    382: "Football Superleague Kosovo",
+
+    # LÜKSEMBURG
+    117: "National Division LUX",
+
+    # MALTA
+    356: "Premier League MT",
+
+    # GİBRALTAR
+    392: "Gibraltar Premier Division",
+
+    # FAROE ADALARI
+    387: "Faroe Islands Premier League",
+
+    # ERMENİSTAN
+    371: "Armenian Premier League",
+
+    # GÜRCİSTAN
+    372: "Erovnuli Liga",
+
+    # AZERBAYCAN
+    373: "Premier League AZ",
+
+    # KAZAKİSTAN
+    376: "Premier League KZ",
+
+    # ── ORTA DOĞU ──
+    307: "Saudi Pro League", 308: "Division 1 SA",
+    435: "UAE Pro League", 436: "UAE Division 1",
+    350: "Stars League QAT",
+    290: "Persian Gulf Pro League", 291: "Azadegan League",
+    384: "Ligat ha'Al", 385: "Liga Leumit",
+    285: "Jordan Pro League",
+    403: "Lebanon Premier League",
+    406: "Iraqi Premier League",
+    343: "Bahrain Premier League",
+    344: "Kuwait Premier League",
+    430: "Oman Professional League",
+
+    # ── ASYA ──
+    98: "J1 League", 99: "J2 League", 100: "J3 League",
+    292: "K League 1", 293: "K League 2",
+    169: "Chinese Super League", 170: "China League One", 171: "China League Two",
+    323: "Indian Super League", 324: "I-League",
+    296: "Thai League 1", 297: "Thai League 2",
+    313: "Liga 1 ID", 314: "Liga 2 ID",
+    301: "Malaysia Super League",
+    304: "Singapore Premier League",
+    302: "Vietnam V.League 1",
+    336: "Philippines Football League",
+    397: "AFC Champions League",
+    260: "Pakistan Premier League",
+    303: "Myanmar National League",
+    305: "Hong Kong Premier League",
+    306: "Macau Premier League",
+
+    # ── AVUSTRALYA ──
+    188: "A-League", 189: "NPL Australia",
+
+    # ── AFRİKA ──
+    288: "Premier Soccer League ZA",
+    233: "Egyptian Premier League",
+    200: "Botola Pro MA",
+    201: "Ligue Pro TN",
+    299: "CAF Champions League",
+    370: "Nigeria Professional Football League",
+    366: "Ghana Premier League",
+    362: "Ethiopian Premier League",
+    363: "Kenyan Premier League",
+    369: "Zambia Super League",
+    368: "Zimbabwe Premier Soccer League",
+    367: "Ugandan Premier League",
+    364: "Tanzanian Mainland",
+    361: "Rwandan Premier League",
+    359: "Angolan Girabola",
+    358: "Mozambique Moçambola",
+    360: "Botswana Premier League",
+    365: "Senegal Premier League",
+    386: "Ivory Coast Ligue 1",
+    388: "Cameroon Elite One",
+    389: "DR Congo Linafoot",
+    390: "Algeria Ligue Professionnelle 1",
+    391: "Libya Premier League",
+    393: "Sudan Premier League",
+    394: "Somalia Premier League",
+    395: "Tanzania Mainland",
+    396: "Malawi Super League",
+
+    # ── KUZEY AMERİKA ──
+    253: "MLS", 254: "USL Championship", 255: "USL League One",
+    321: "Canadian Premier League",
+    262: "Liga MX", 263: "Liga de Expansion MX",
+
+    # ── ORTA AMERİKA / KARİBLER ──
+    309: "Liga Nacional GT",
+    310: "Primera Division SV",
+    312: "Liga Nacional HN",
+    317: "Panama Liga",
+    320: "Costa Rica Primera Division",
+    319: "Nicaragua Primera Division",
+    315: "Dominican Republic LDF",
+
+    # ── GÜNEY AMERİKA ──
+    71: "Serie A BR", 72: "Serie B BR", 73: "Serie C BR",
+    128: "Liga Profesional AR", 129: "Primera Nacional AR",
+    265: "Primera Division CL", 266: "Primera B CL",
+    239: "Liga BetPlay CO",
+    268: "Primera Division UY",
+    267: "Division Profesional PY",
+    281: "Liga 1 PE",
+    240: "LigaPro EC",
+    269: "Liga FUTVE",
+    242: "Primera Division BO",
+    278: "Primera Division CR",
+    11: "Copa Libertadores", 13: "Copa Sudamericana",
+
+    # ── ULUSLARARASI ──
+    2: "Şampiyonlar Ligi", 3: "Avrupa Ligi", 848: "Konferans Ligi",
+    1: "Dünya Kupası",
+    9: "Dünya Kupası Elemeleri Avrupa",
+    29: "Dünya Kupası Elemeleri Güney Amerika",
+    30: "Dünya Kupası Elemeleri Asya",
+    31: "Dünya Kupası Elemeleri Afrika",
+    32: "Dünya Kupası Elemeleri CONCACAF",
+    4: "Avrupa Şampiyonası",
+    6: "Afrika Uluslar Kupası",
+    7: "CONCACAF Gold Cup",
+    10: "Copa America",
+    16: "UEFA Nations League",
+    17: "AFC Asian Cup",
 }
 
 TURKISH_TEAMS = {
@@ -70,23 +339,9 @@ TURKISH_TEAMS = {
     "hatayspor": "Hatayspor", "samsunspor": "Samsunspor", "ankaragücü": "Ankaragucu",
     "ankaragucu": "Ankaragucu", "eyupspor": "Eyupspor", "eyüpspor": "Eyupspor",
     "goztepe": "Goztepe", "göztepe": "Goztepe", "pendikspor": "Pendikspor",
-    "istanbulspor": "Istanbulspor",
+    "istanbulspor": "Istanbulspor", "bodrum": "Bodrum FK", "bodrumspor": "Bodrum FK",
+    "çorum": "Corum FK", "corum": "Corum FK",
 }
-
-EN_MONTHS = {
-    "january": "01", "february": "02", "march": "03", "april": "04",
-    "may": "05", "june": "06", "july": "07", "august": "08",
-    "september": "09", "october": "10", "november": "11", "december": "12",
-    "jan": "01", "feb": "02", "mar": "03", "apr": "04",
-    "jun": "06", "jul": "07", "aug": "08", "sep": "09",
-    "oct": "10", "nov": "11", "dec": "12",
-}
-
-EN_DAYS = {
-    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-    "friday": 4, "saturday": 5, "sunday": 6,
-}
-
 
 def normalize(text):
     tr = "çÇğĞıİöÖşŞüÜ"
@@ -95,77 +350,8 @@ def normalize(text):
         text = text.replace(t, e)
     return text
 
-
 def resolve_team_name(name):
     return TURKISH_TEAMS.get(name.lower().strip(), name)
-
-
-def parse_date_input(text):
-    text = text.strip().lower()
-    today = date.today()
-    current_year = today.year
-
-    if text in ["today"]:
-        return today.strftime("%Y-%m-%d"), today.strftime("%B %d, %Y")
-    if text in ["tomorrow"]:
-        d = today + timedelta(days=1)
-        return d.strftime("%Y-%m-%d"), d.strftime("%B %d, %Y")
-
-    # Day name (monday, tuesday...)
-    for day_name, day_idx in EN_DAYS.items():
-        if day_name in text:
-            current_day = today.weekday()
-            diff = (day_idx - current_day) % 7
-            if diff == 0:
-                diff = 7
-            d = today + timedelta(days=diff)
-            return d.strftime("%Y-%m-%d"), d.strftime("%B %d, %Y")
-
-    # "March 10" or "March 10 2026" or "10 March" or "10 March 2026"
-    parts = text.replace(",", "").split()
-    if len(parts) >= 2:
-        # "March 10" format
-        if parts[0] in EN_MONTHS and parts[1].isdigit():
-            month = EN_MONTHS[parts[0]]
-            day = parts[1]
-            year = parts[2] if len(parts) >= 3 and parts[2].isdigit() else str(current_year)
-            try:
-                d = date(int(year), int(month), int(day))
-                return d.strftime("%Y-%m-%d"), d.strftime("%B %d, %Y")
-            except:
-                pass
-        # "10 March" format
-        if parts[0].isdigit() and parts[1] in EN_MONTHS:
-            day = parts[0]
-            month = EN_MONTHS[parts[1]]
-            year = parts[2] if len(parts) >= 3 and parts[2].isdigit() else str(current_year)
-            try:
-                d = date(int(year), int(month), int(day))
-                return d.strftime("%Y-%m-%d"), d.strftime("%B %d, %Y")
-            except:
-                pass
-
-    # "09.03.2026" or "09/03/2026"
-    for sep in [".", "/"]:
-        if sep in text:
-            p = text.split(sep)
-            if len(p) == 3:
-                try:
-                    d = date(int(p[2]), int(p[1]), int(p[0]))
-                    return d.strftime("%Y-%m-%d"), d.strftime("%B %d, %Y")
-                except:
-                    pass
-
-    # "2026-03-09"
-    if len(text) == 10 and text[4] == "-":
-        try:
-            d = date.fromisoformat(text)
-            return d.strftime("%Y-%m-%d"), d.strftime("%B %d, %Y")
-        except:
-            pass
-
-    return None, None
-
 
 def safe_request(url):
     headers = {"x-apisports-key": API_KEY}
@@ -179,7 +365,6 @@ def safe_request(url):
         time.sleep(1)
     return None
 
-
 def search_team_id(team_name):
     resolved = resolve_team_name(team_name)
     for name in [resolved, normalize(resolved)]:
@@ -189,9 +374,9 @@ def search_team_id(team_name):
             return t["id"], t["name"]
     return None, None
 
-
-def get_last5(team_id):
-    r = safe_request(f"{API_URL}/fixtures?team={team_id}&last=5&status=FT")
+# ── VERİ ÇEKİMİ ───────────────────────────────────────────────
+def get_last_matches(team_id, count=10):
+    r = safe_request(f"{API_URL}/fixtures?team={team_id}&last={count}&status=FT")
     if not r:
         return []
     matches = []
@@ -201,74 +386,196 @@ def get_last5(team_id):
         if gh is None or ga is None:
             continue
         is_home = m["teams"]["home"]["id"] == team_id
-        if is_home:
-            matches.append({"scored": gh, "conceded": ga, "gh": gh, "ga": ga})
-        else:
-            matches.append({"scored": ga, "conceded": gh, "gh": gh, "ga": ga})
+        matches.append({
+            "scored":   gh if is_home else ga,
+            "conceded": ga if is_home else gh,
+            "gh": gh, "ga": ga,
+            "is_home": is_home,
+        })
     return matches
 
-
-def get_last10(team_id):
-    r = safe_request(f"{API_URL}/fixtures?team={team_id}&last=10&status=FT")
+def get_venue_matches(team_id, venue="home", count=8):
+    r = safe_request(f"{API_URL}/fixtures?team={team_id}&last=25&status=FT")
     if not r:
         return []
     matches = []
     for m in r.get("response", []):
+        is_home = m["teams"]["home"]["id"] == team_id
+        if venue == "home" and not is_home:
+            continue
+        if venue == "away" and is_home:
+            continue
         gh = m["goals"]["home"]
         ga = m["goals"]["away"]
         if gh is None or ga is None:
             continue
-        matches.append((gh, ga))
+        matches.append({
+            "scored":   gh if is_home else ga,
+            "conceded": ga if is_home else gh,
+            "gh": gh, "ga": ga,
+        })
+        if len(matches) >= count:
+            break
     return matches
 
-
-def get_h2h_smart(id1, id2):
+def get_h2h(id1, id2):
     r = safe_request(f"{API_URL}/fixtures/headtohead?h2h={id1}-{id2}&last=10")
     if not r:
         return [], 0, 0
-    cutoff_3y = datetime.now(timezone.utc) - timedelta(days=3 * 365)
-    recent_matches = []
-    total_found = 0
+    cutoff = datetime.now(timezone.utc) - timedelta(days=3*365)
+    recent, total = [], 0
     for m in r.get("response", []):
         gh = m["goals"]["home"]
         ga = m["goals"]["away"]
         if gh is None or ga is None:
             continue
-        total_found += 1
+        total += 1
         try:
-            match_date = datetime.fromisoformat(m["fixture"]["date"].replace("Z", "+00:00"))
-            if match_date >= cutoff_3y:
-                recent_matches.append((gh, ga))
+            md = datetime.fromisoformat(m["fixture"]["date"].replace("Z", "+00:00"))
+            if md >= cutoff:
+                recent.append((gh, ga))
         except:
             pass
-    return recent_matches, len(recent_matches), total_found
+    return recent, len(recent), total
 
+# ── ANALİZ FONKSİYONLARI ──────────────────────────────────────
+def poisson_prob(lam, k):
+    if k > 15:
+        return 0.0
+    return (math.exp(-lam) * (lam ** k)) / math.factorial(k)
 
-def btts_prob(lh, la):
-    p_home0 = math.exp(-lh)
-    p_away0 = math.exp(-la)
-    p_00    = math.exp(-(lh + la))
-    return 1 - (p_home0 + p_away0 - p_00)
+def weighted_avg(values, decay=0.88):
+    if not values:
+        return 0.0
+    total_w, weighted_sum, w = 0.0, 0.0, 1.0
+    for v in reversed(values):
+        weighted_sum += v * w
+        total_w += w
+        w *= decay
+    return weighted_sum / total_w if total_w > 0 else 0.0
 
+def calc_lambda(home_gen, away_gen, home_venue, away_venue):
+    """
+    Gelişmiş lambda:
+    - Son 10 maç ağırlıklı ortalama (decay=0.88)
+    - Ev/dep venue spesifik %60 + genel %40
+    - Ev sahibi avantajı x1.08
+    """
+    hsg = weighted_avg([m["scored"]   for m in home_gen])
+    hcg = weighted_avg([m["conceded"] for m in home_gen])
+    asg = weighted_avg([m["scored"]   for m in away_gen])
+    acg = weighted_avg([m["conceded"] for m in away_gen])
 
-def monte_carlo_btts(lh, la, sims=5000):
-    yes = 0
+    hsv = weighted_avg([m["scored"]   for m in home_venue]) if home_venue else hsg
+    hcv = weighted_avg([m["conceded"] for m in home_venue]) if home_venue else hcg
+    asv = weighted_avg([m["scored"]   for m in away_venue]) if away_venue else asg
+    acv = weighted_avg([m["conceded"] for m in away_venue]) if away_venue else acg
+
+    hs = hsv * 0.6 + hsg * 0.4
+    hc = hcv * 0.6 + hcg * 0.4
+    as_ = asv * 0.6 + asg * 0.4
+    ac = acv * 0.6 + acg * 0.4
+
+    lh = ((hs + ac) / 2) * 1.08
+    la = (as_ + hc) / 2
+
+    return max(0.15, min(lh, 5.0)), max(0.15, min(la, 5.0))
+
+def btts_prob_calc(lh, la):
+    return 1 - (math.exp(-lh) + math.exp(-la) - math.exp(-(lh + la)))
+
+def over_prob_calc(lam_total, threshold):
+    k_max = math.floor(threshold)
+    p_under = sum(poisson_prob(lam_total, k) for k in range(k_max + 1))
+    return max(0.0, min(1.0, 1 - p_under))
+
+def monte_carlo(lh, la, sims=10000):
+    def sample(lam):
+        L = math.exp(-lam)
+        k, p = 0, 1.0
+        while p > L:
+            k += 1
+            p *= random.random()
+        return k - 1
+
+    btts_yes = over15 = over25 = 0
     for _ in range(sims):
-        def sample(lam):
-            L = math.exp(-lam)
-            k, p = 0, 1.0
-            while p > L:
-                k += 1
-                p *= random.random()
-            return k - 1
-        if sample(lh) > 0 and sample(la) > 0:
-            yes += 1
-    mc_prob = yes / sims
-    z = 1.96
-    margin = z * math.sqrt((mc_prob * (1 - mc_prob)) / sims)
-    return mc_prob, max(0, mc_prob - margin), min(1, mc_prob + margin)
+        h = sample(lh)
+        a = sample(la)
+        if h > 0 and a > 0:
+            btts_yes += 1
+        if h + a > 1:
+            over15 += 1
+        if h + a > 2:
+            over25 += 1
+    return btts_yes/sims, over15/sims, over25/sims
 
+def calc_form_bonus(matches):
+    if not matches:
+        return 0.0
+    son5 = matches[-5:]
+    puan = sum(3 if m["scored"] > m["conceded"] else (1 if m["scored"] == m["conceded"] else 0) for m in son5)
+    return (puan / 15 - 0.5) * 0.05
 
+def calculate_ht_ft(lh, la):
+    """
+    İY/MS — Python kodundan alınan algoritma
+    İlk yarı %45, ikinci yarı %55 lambda
+    """
+    lh_ht = lh * 0.45
+    la_ht = la * 0.45
+    lh_2h = lh * 0.55
+    la_2h = la * 0.55
+
+    ht_ft_probs = defaultdict(float)
+
+    for h_ht in range(6):
+        for a_ht in range(6):
+            p_ht = poisson_prob(lh_ht, h_ht) * poisson_prob(la_ht, a_ht)
+            if p_ht < 0.0003:
+                continue
+            if h_ht > a_ht:   ht = "1"
+            elif h_ht < a_ht: ht = "2"
+            else:              ht = "X"
+
+            for h_2h in range(6):
+                for a_2h in range(6):
+                    p_2h = poisson_prob(lh_2h, h_2h) * poisson_prob(la_2h, a_2h)
+                    if p_2h < 0.0003:
+                        continue
+                    h_ft = h_ht + h_2h
+                    a_ft = a_ht + a_2h
+                    if h_ft > a_ft:   ft = "1"
+                    elif h_ft < a_ft: ft = "2"
+                    else:             ft = "X"
+                    ht_ft_probs[f"{ht}/{ft}"] += p_ht * p_2h
+
+    top2 = sorted(ht_ft_probs.items(), key=lambda x: x[1], reverse=True)[:2]
+    return [(k, v * 100) for k, v in top2]
+
+def ht_ft_desc(code):
+    return {
+        "1/1": "Ev Önde → Ev Kazanır",
+        "X/1": "Berabere → Ev Kazanır",
+        "X/2": "Berabere → Dep. Kazanır",
+        "2/2": "Dep. Önde → Dep. Kazanır",
+        "X/X": "Berabere → Berabere",
+        "2/1": "Dep. Önde → Ev Kazanır",
+        "1/X": "Ev Önde → Berabere",
+        "1/2": "Ev Önde → Dep. Kazanır",
+        "2/X": "Dep. Önde → Berabere",
+    }.get(code, code)
+
+def top_scores_list(lh, la, n=3):
+    probs = {}
+    for h in range(8):
+        ph = math.exp(-lh) * (lh**h) / math.factorial(h)
+        for a in range(8):
+            pa = math.exp(-la) * (la**a) / math.factorial(a)
+            probs[f"{h}-{a}"] = ph * pa
+    return sorted(probs.items(), key=lambda x: x[1], reverse=True)[:n]
+
+# ── ANA ANALİZ ────────────────────────────────────────────────
 def analyze_teams(id1, name1, id2, name2):
     key = f"{name1.lower()}_{name2.lower()}"
     now = datetime.now().timestamp()
@@ -276,117 +583,181 @@ def analyze_teams(id1, name1, id2, name2):
         if now - analysis_cache[key]["time"] < CACHE_TIME:
             return analysis_cache[key]["data"]
 
-    home5 = get_last5(id1)
-    away5 = get_last5(id2)
-    if not home5 or not away5:
+    # Veri çek
+    home_gen   = get_last_matches(id1, 10)
+    away_gen   = get_last_matches(id2, 10)
+    home_venue = get_venue_matches(id1, "home", 8)
+    away_venue = get_venue_matches(id2, "away", 8)
+
+    if not home_gen or not away_gen:
         return None
 
-    h_s = sum(m["scored"]   for m in home5) / len(home5)
-    h_c = sum(m["conceded"] for m in home5) / len(home5)
-    a_s = sum(m["scored"]   for m in away5) / len(away5)
-    a_c = sum(m["conceded"] for m in away5) / len(away5)
+    # Lambda hesapla
+    lh, la = calc_lambda(home_gen, away_gen, home_venue, away_venue)
+    lam_total = lh + la
 
-    lam_home = (h_s + a_c) / 2
-    lam_away = (a_s + h_c) / 2
+    # Form bonusu
+    fb_home = calc_form_bonus(home_gen)
+    fb_away = calc_form_bonus(away_gen)
+    form_adj = (fb_home + fb_away) / 2
 
-    weight_factor = 1.2
-    lam_home_w = ((h_s * weight_factor) + a_c) / (2 + weight_factor - 1)
-    lam_away_w = ((a_s * weight_factor) + h_c) / (2 + weight_factor - 1)
+    # KG
+    kg_poisson  = btts_prob_calc(lh, la)
+    mc_kg, mc_o15, mc_o25 = monte_carlo(lh, la, 10000)
+    kg_raw = (kg_poisson * 0.6 + mc_kg * 0.4) + form_adj
+    kg_raw = max(0.05, min(0.95, kg_raw))
 
-    p_yes          = btts_prob(lam_home, lam_away)
-    p_yes_weighted = btts_prob(lam_home_w, lam_away_w)
-    mc_prob, mc_lower, mc_upper = monte_carlo_btts(lam_home, lam_away, 5000)
-
-    final = (p_yes + p_yes_weighted + mc_prob) / 3
-    final = max(0.05, min(0.95, final))
-
-    home5_btts  = sum(1 for m in home5 if m["gh"] > 0 and m["ga"] > 0)
-    away5_btts  = sum(1 for m in away5 if m["gh"] > 0 and m["ga"] > 0)
-    home10      = get_last10(id1)
-    away10      = get_last10(id2)
-    home10_btts = sum(1 for gh, ga in home10 if gh > 0 and ga > 0)
-    away10_btts = sum(1 for gh, ga in away10 if gh > 0 and ga > 0)
-
-    h2h, h2h_recent_count, h2h_total = get_h2h_smart(id1, id2)
-    if h2h and h2h_recent_count >= 2:
-        h2h_btts = sum(1 for gh, ga in h2h if gh > 0 and ga > 0)
-        h2h_note = f"{h2h_btts}/{len(h2h)}"
-    elif h2h_total > 0 and h2h_recent_count == 0:
-        h2h_note = "old"
-    elif h2h_recent_count == 1:
-        h2h_btts = sum(1 for gh, ga in h2h if gh > 0 and ga > 0)
-        h2h_note = f"{h2h_btts}/{len(h2h)}"
+    # H2H KG düzeltmesi
+    h2h, h2h_recent, h2h_total = get_h2h(id1, id2)
+    h2h_note = "yok"
+    if h2h and h2h_recent >= 2:
+        h2h_kg = sum(1 for gh, ga in h2h if gh > 0 and ga > 0) / len(h2h)
+        kg_final = kg_raw * 0.65 + h2h_kg * 0.35
+        h2h_note = f"{sum(1 for gh,ga in h2h if gh>0 and ga>0)}/{len(h2h)}"
+    elif h2h_recent == 1:
+        h2h_kg = sum(1 for gh, ga in h2h if gh > 0 and ga > 0) / len(h2h)
+        kg_final = kg_raw * 0.80 + h2h_kg * 0.20
+        h2h_note = f"{sum(1 for gh,ga in h2h if gh>0 and ga>0)}/{len(h2h)}"
+    elif h2h_total > 0 and h2h_recent == 0:
+        kg_final = kg_raw
+        h2h_note = "eski"
     else:
-        h2h_note = "none"
+        kg_final = kg_raw
 
-    warnings = []
-    if len(home5) < 3:
-        warnings.append("⚠️ Insufficient home team data")
-    if len(away5) < 3:
-        warnings.append("⚠️ Insufficient away team data")
-    if h2h_note == "none":
-        warnings.append("⚠️ No H2H data found")
-    elif h2h_note == "old":
-        warnings.append("⚠️ H2H data older than 3 years — not used")
-    if lam_home <= 0.2 and lam_away <= 0.2:
-        warnings.append("⚠️ Very low xG — data may be unreliable")
+    kg_final = max(0.05, min(0.95, kg_final))
 
-    if len(warnings) == 0:
-        reliability = "🟢 High"
-    elif len(warnings) == 1:
-        reliability = "🟡 Medium"
-    else:
-        reliability = "🔴 Low — treat with caution"
+    # Alt/Üst
+    o15_poisson = over_prob_calc(lam_total, 1.5)
+    o25_poisson = over_prob_calc(lam_total, 2.5)
+    o15_final = max(0.05, min(0.95, (o15_poisson * 0.6 + mc_o15 * 0.4) + form_adj))
+    o25_final = max(0.05, min(0.95, (o25_poisson * 0.6 + mc_o25 * 0.4) + form_adj))
+
+    # İY/MS
+    ht_ft = calculate_ht_ft(lh, la)
+
+    # Son maç KG sayıları
+    home5_kg  = sum(1 for m in home_gen[:5] if m["gh"] > 0 and m["ga"] > 0)
+    away5_kg  = sum(1 for m in away_gen[:5] if m["gh"] > 0 and m["ga"] > 0)
+    home10_kg = sum(1 for m in home_gen if m["gh"] > 0 and m["ga"] > 0)
+    away10_kg = sum(1 for m in away_gen if m["gh"] > 0 and m["ga"] > 0)
+
+    # Güvenilirlik
+    warns = []
+    if len(home_gen) < 5:  warns.append("⚠️ Ev takımı verisi yetersiz")
+    if len(away_gen) < 5:  warns.append("⚠️ Deplasman takımı verisi yetersiz")
+    if h2h_note == "yok":  warns.append("⚠️ H2H verisi bulunamadı")
+    elif h2h_note == "eski": warns.append("⚠️ H2H verisi 3 yıldan eski")
+    if lh <= 0.2 and la <= 0.2: warns.append("⚠️ Çok düşük xG — veri güvenilmez olabilir")
+
+    if len(warns) == 0:   reliability = "🟢 Yüksek"
+    elif len(warns) == 1: reliability = "🟡 Orta"
+    else:                 reliability = "🔴 Düşük — dikkatli ol"
+
+    scores = top_scores_list(lh, la, 3)
 
     result = {
         "h": name1, "a": name2,
-        "p": int(final * 100),
-        "lh": round(lam_home, 2), "la": round(lam_away, 2),
-        "lh_w": round(lam_home_w, 2), "la_w": round(lam_away_w, 2),
-        "p_yes":   int(p_yes * 100),
-        "p_yes_w": int(p_yes_weighted * 100),
-        "mc":      int(mc_prob * 100),
-        "mc_low":  int(mc_lower * 100),
-        "mc_high": int(mc_upper * 100),
-        "home_btts_5":  f"{home5_btts}/5",
-        "away_btts_5":  f"{away5_btts}/5",
-        "home_btts_10": f"{home10_btts}/{len(home10)}",
-        "away_btts_10": f"{away10_btts}/{len(away10)}",
+        "lh": round(lh, 2), "la": round(la, 2),
+        "kg":    int(kg_final * 100),
+        "kg_no": int((1 - kg_final) * 100),
+        "o15": int(o15_final * 100), "u15": int((1 - o15_final) * 100),
+        "o25": int(o25_final * 100), "u25": int((1 - o25_final) * 100),
+        "htft": ht_ft,
+        "home5_kg":  f"{home5_kg}/5",
+        "away5_kg":  f"{away5_kg}/5",
+        "home10_kg": f"{home10_kg}/{len(home_gen)}",
+        "away10_kg": f"{away10_kg}/{len(away_gen)}",
         "h2h_note": h2h_note,
-        "warnings": warnings,
+        "scores": scores,
+        "warns": warns,
         "reliability": reliability,
     }
     analysis_cache[key] = {"data": result, "time": now}
     return result
 
+def format_analysis(result):
+    h2h_line = {
+        "yok":  "🤝 H2H: Veri yok\n",
+        "eski": "🤝 H2H: 3 yıldan eski — kullanılmadı\n",
+    }.get(result["h2h_note"], f"🤝 H2H KG: {result['h2h_note']}\n")
 
-def get_match_analysis(team1, team2):
-    id1, name1 = search_team_id(team1)
-    id2, name2 = search_team_id(team2)
-    if not id1:
-        return {"error": f"Team not found: '{team1}'"}
-    if not id2:
-        return {"error": f"Team not found: '{team2}'"}
-    result = analyze_teams(id1, name1, id2, name2)
-    if not result:
-        return {"error": "Match data not found"}
-    return result
+    kg_karar  = "✅ KG VAR"  if result["kg"]  >= 60 else ("❌ KG YOK"  if result["kg_no"] >= 60 else "⚠️ BELİRSİZ")
+    o15_karar = "✅ 1.5 ÜST" if result["o15"] >= 65 else "❌ 1.5 ALT"
+    o25_karar = "✅ 2.5 ÜST" if result["o25"] >= 55 else "❌ 2.5 ALT"
 
+    htft_emojis = {
+        "1/1": "🏠", "X/1": "🔄", "X/2": "🔄", "2/2": "✈️",
+        "X/X": "🤝", "2/1": "🔄", "1/X": "🤝", "1/2": "🔄", "2/X": "🤝",
+    }
+    htft_lines = ""
+    for i, (code, prob) in enumerate(result["htft"], 1):
+        emoji = htft_emojis.get(code, "⚽")
+        htft_lines += f"   {i}. {emoji} {code} — %{prob:.1f} ({ht_ft_desc(code)})\n"
 
-def get_fixtures_for_date(target_date_str):
+    score_lines = ""
+    for sc, prob in result["scores"]:
+        parts = sc.split("-")
+        kg_icon = "✅" if int(parts[0]) > 0 and int(parts[1]) > 0 else "❌"
+        score_lines += f"   {kg_icon} {sc}  %{prob*100:.1f}\n"
+
+    warn_lines = ("\n" + "\n".join(result["warns"]) + "\n") if result["warns"] else ""
+
+    return (
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "      📊 MAÇ ANALİZİ\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🏳 {result['h']}\n"
+        f"🚩 {result['a']}\n\n"
+        f"⚡ xG: Ev {result['lh']}  |  Dep {result['la']}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "  ⚽ KARŞILIKLI GOL (KG)\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"   KG VAR: %{result['kg']}\n"
+        f"   KG YOK: %{result['kg_no']}\n"
+        f"   Son 5:  🏳 {result['home5_kg']}  🚩 {result['away5_kg']}\n"
+        f"   Son 10: 🏳 {result['home10_kg']}  🚩 {result['away10_kg']}\n"
+        f"   {h2h_line}"
+        f"   👉 {kg_karar}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "     📈 ALT / ÜST\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"   1.5 Üst: %{result['o15']}  |  Alt: %{result['u15']}\n"
+        f"   2.5 Üst: %{result['o25']}  |  Alt: %{result['u25']}\n"
+        f"   👉 {o15_karar}  |  {o25_karar}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "  🔄 İLK YARI / MAÇ SONU\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"{htft_lines}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "    🎯 OLASI SKORLAR\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"{score_lines}"
+        f"{warn_lines}\n"
+        f"📶 Güvenilirlik: {result['reliability']}\n"
+        "━━━━━━━━━━━━━━━━━━━━"
+    )
+
+# ── BÜLTEN ────────────────────────────────────────────────────
+def get_todays_fixtures():
+    today = date.today().strftime("%Y-%m-%d")
     current_year = datetime.now().year
     all_fixtures = []
+    seen_ids = set()
     for league_id, league_name in MAJOR_LEAGUES.items():
         for season in [current_year, current_year - 1]:
-            r = safe_request(f"{API_URL}/fixtures?date={target_date_str}&league={league_id}&season={season}")
+            r = safe_request(f"{API_URL}/fixtures?date={today}&league={league_id}&season={season}")
             if not r:
                 continue
             matches = r.get("response", [])
             if not matches:
                 continue
             for m in matches:
+                fid = m["fixture"]["id"]
+                if fid in seen_ids:
+                    continue
                 if m["fixture"]["status"]["short"] not in ["NS", "TBD"]:
                     continue
+                seen_ids.add(fid)
                 all_fixtures.append({
                     "league":    league_name,
                     "home_id":   m["teams"]["home"]["id"],
@@ -396,448 +767,281 @@ def get_fixtures_for_date(target_date_str):
                     "kickoff":   m["fixture"]["date"],
                 })
             break
-        time.sleep(0.3)
+        time.sleep(0.25)
     return all_fixtures
 
-
-def get_todays_fixtures():
-    return get_fixtures_for_date(date.today().strftime("%Y-%m-%d"))
-
-
-def build_daily_combine():
+def find_auto_pick(threshold=65):
+    global shown_auto
     fixtures = get_todays_fixtures()
     if not fixtures:
         return None, None
-    qualified = []
-    for fix in fixtures:
-        try:
-            result = analyze_teams(
-                fix["home_id"], fix["home_name"],
-                fix["away_id"], fix["away_name"],
-            )
-            if (result
-                    and result["p"] >= COMBINE_THRESHOLD
-                    and result["reliability"] != "🔴 Low — treat with caution"):
-                qualified.append({**fix, **result})
-            time.sleep(0.2)
-        except:
-            continue
-    if not qualified:
-        return None, None
-    qualified.sort(key=lambda x: x["p"], reverse=True)
-    return qualified[:3], qualified[3:6] if len(qualified) >= 4 else None
 
+    unseen = [f for f in fixtures if f"{f['home_id']}_{f['away_id']}" not in shown_auto]
+    if not unseen:
+        shown_auto.clear()
+        unseen = fixtures
 
-def format_combine_block(combine, label):
-    prob = 1.0
-    for m in combine:
-        prob *= m["p"] / 100
-    lines = [f"🎯 BTTS COMBINE {label}\n"]
-    lines.append(f"📅 {date.today().strftime('%d.%m.%Y')}\n")
-    for i, m in enumerate(combine, 1):
-        try:
-            ko = datetime.fromisoformat(m["kickoff"].replace("Z", "+00:00"))
-            ko_str = ko.strftime("%H:%M")
-        except:
-            ko_str = "?"
-        lines.append(
-            f"{i}. {m['league']}\n"
-            f"   🏳 {m['h']} vs 🚩 {m['a']}\n"
-            f"   ⏰ {ko_str}  |  ✅ BTTS YES  |  🎯 {m['p']}%\n"
-        )
-    lines.append(f"\n📊 Win Probability: {int(prob * 100)}%")
-    lines.append("⚠️ Always bet responsibly.")
-    return "\n".join(lines)
+    random.shuffle(unseen)
 
+    for fix in unseen:
+        mk = f"{fix['home_id']}_{fix['away_id']}"
+        result = analyze_teams(fix["home_id"], fix["home_name"], fix["away_id"], fix["away_name"])
+        shown_auto.add(mk)
+        if result and result["kg"] >= threshold and result["reliability"] != "🔴 Düşük — dikkatli ol":
+            return fix, result
+        time.sleep(0.15)
+    return None, None
 
-def format_combine(combine1, combine2=None):
-    text = format_combine_block(combine1, "#1")
-    if combine2:
-        text += "\n\n" + format_combine_block(combine2, "#2")
-    return text
-
-
-def format_match_result(result, fix, label, next_cmd="/auto"):
-    try:
-        ko = datetime.fromisoformat(fix["kickoff"].replace("Z", "+00:00"))
-        ko_str = ko.strftime("%H:%M")
-    except:
-        ko_str = "?"
-
-    prob = result["p"]
-    icon = "✅" if prob >= 50 else "⛔️"
-
-    if result["h2h_note"] == "old":
-        h2h_line = "🕐 H2H: Only old data (3+ years) — not used\n"
-    elif result["h2h_note"] == "none":
-        h2h_line = "🕐 H2H: No data\n"
-    else:
-        h2h_line = f"🤝 H2H (last 3y): {result['h2h_note']} BTTS\n"
-
-    warning_lines = ""
-    if result.get("warnings"):
-        warning_lines = "\n" + "\n".join(result["warnings"]) + "\n"
-
-    return (
-        f"{label}\n\n"
-        f"🏆 {fix['league']}\n"
-        f"🏳 {result['h']}\n"
-        f"🚩 {result['a']}\n"
-        f"⏰ {ko_str}\n\n"
-        f"⚽ xG Home: {result['lh']}  |  Away: {result['la']}\n\n"
-        f"📈 BTTS Probability: {result['p_yes']}%\n"
-        f"📐 BTTS Weighted:    {result['p_yes_w']}%\n"
-        f"🎲 Monte Carlo:      {result['mc']}% ({result['mc_low']}-{result['mc_high']}%)\n\n"
-        f"⚽ Last 5 BTTS:  🏳 {result['home_btts_5']}  |  🚩 {result['away_btts_5']}\n"
-        f"⚽ Last 10 BTTS: 🏳 {result['home_btts_10']}  |  🚩 {result['away_btts_10']}\n"
-        f"{h2h_line}"
-        f"{warning_lines}\n"
-        f"📶 Reliability: {result['reliability']}\n\n"
-        f"{icon} BTTS YES\n"
-        f"🎯 Confidence: {prob}%\n\n"
-        f"➡️ {next_cmd} for another pick\n"
-        "🔴 /stop to pause the bot"
-    )
-
-
-async def send_daily_combine(app):
+# ── VİP SÜRESİ KONTROL ────────────────────────────────────────
+async def check_vip_expiry(app):
     while True:
-        now = datetime.now()
-        target = now.replace(hour=COMBINE_HOUR, minute=0, second=0, microsecond=0)
-        if now >= target:
-            target += timedelta(days=1)
-        await asyncio.sleep((target - now).total_seconds())
-        if not bot_active:
-            continue
-        try:
-            combine1, combine2 = build_daily_combine()
-            if not combine1:
+        await asyncio.sleep(3600)
+        for uid in get_expired_vips():
+            remove_vip(uid)
+            try:
                 await app.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text="📋 Daily Combine\n\n❌ No matches found with 65%+ confidence today."
+                    chat_id=int(uid),
+                    text=(
+                        "⏰ VİP üyeliğinizin süresi doldu!\n\n"
+                        "Analizlere devam etmek için VİP alın:\n\n"
+                        "💎 7 Günlük VİP: 800₺\n"
+                        "📩 İletişim: @blutad"
+                    )
                 )
-            else:
-                await app.bot.send_message(chat_id=ADMIN_ID, text=format_combine(combine1, combine2))
-        except Exception as e:
-            print("Combine error:", e)
+            except:
+                pass
 
+# ── TELEGRAM KOMUTLARI ────────────────────────────────────────
+VIP_REQUIRED_MSG = (
+    "🚫 VİP Üye Olmadığınız için İşlem Yapılmıyor.\n\n"
+    "💎 7 Günlük VİP: 800₺\n"
+    "📩 İletişim: @blutad"
+)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔️ Access Denied.")
+    uid = update.effective_user.id
+    if uid == ADMIN_ID:
+        await update.message.reply_text(
+            "👑 Hoş geldin Admin!\n\n"
+            "📌 Komutlar:\n\n"
+            "⚽ /analiz — Maç analizi (KG + Alt/Üst + İY/MS)\n"
+            "🤖 /otomatik — Bugünkü bültenden %65+ maç\n"
+            "🔴 /dur — Botu durdur\n\n"
+            "👑 Admin Komutları:\n"
+            "/vipekle [user_id] — 7 günlük VİP ekle\n"
+            "/toplamvip — Tüm VİP listesi"
+        )
         return
-    await update.message.reply_text(
-        "👋 BTTS Analysis Bot active!\n\n"
-        "📌 Commands:\n"
-        "/analyze → Manual match analysis\n"
-        "/combine → Today's combine\n"
-        "/auto → Auto pick from today's bulletin\n"
-        "/date → Analyze a specific date's bulletin\n"
-        "/stop → Pause the bot\n\n"
-        "📅 Daily combine is sent automatically at 09:00."
-    )
 
+    if is_vip(uid):
+        await update.message.reply_text(
+            "✅ Hoş geldin VİP Üye!\n\n"
+            "📌 Komutlar:\n\n"
+            "⚽ /analiz — Maç analizi (KG + Alt/Üst + İY/MS)\n"
+            "🤖 /otomatik — Bugünkü bültenden %65+ maç\n"
+            "🔴 /dur — Botu durdur"
+        )
+    else:
+        await update.message.reply_text(
+            "🚫 Merhaba!\n\n"
+            "VİP Üye Olmadığınız için İşlem Yapılmıyor.\n"
+            "Lütfen VİP Alın.\n\n"
+            "📊 Günlük +400 Maç Analizi\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "💎 VİP: 7 Günlük 800₺\n"
+            "📩 İletişim: @blutad\n"
+            "━━━━━━━━━━━━━━━━━━━━"
+        )
 
-async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def dur_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global bot_active
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔️ Access Denied.")
+    if not is_vip(update.effective_user.id):
+        await update.message.reply_text(VIP_REQUIRED_MSG)
         return
     bot_active = False
-    await update.message.reply_text("🔴 Bot paused.\n\nUse /analyze to resume.")
+    await update.message.reply_text("🔴 Bot durduruldu.\n\nDevam etmek için /analiz veya /otomatik yaz.")
 
-
-async def combine_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def vipekle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔️ Access Denied.")
+        await update.message.reply_text("⛔️ Sadece admin kullanabilir.")
         return
-    wait = await update.message.reply_text("🛜 Scanning today's matches... This may take a minute.")
-    try:
-        combine1, combine2 = build_daily_combine()
-        if not combine1:
-            await wait.edit_text("❌ No matches found with 65%+ confidence today.")
-            return
-        await wait.edit_text(format_combine(combine1, combine2))
-    except Exception as e:
-        await wait.edit_text(f"❌ Error: {e}")
-
-
-async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global shown_matches
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔️ Access Denied.")
+    if not context.args:
+        await update.message.reply_text("Kullanım: /vipekle [user_id]")
         return
-
-    wait = await update.message.reply_text("🛜 Searching a match from today's bulletin...")
     try:
-        fixtures = get_todays_fixtures()
-        if not fixtures:
-            await wait.edit_text("❌ No matches found in today's bulletin.")
-            return
-
-        unseen = [f for f in fixtures if f"{f['home_id']}_{f['away_id']}" not in shown_matches]
-        if not unseen:
-            shown_matches.clear()
-            unseen = fixtures
-
-        random.shuffle(unseen)
-
-        found = None
-        for fix in unseen:
-            match_key = f"{fix['home_id']}_{fix['away_id']}"
-            result = analyze_teams(fix["home_id"], fix["home_name"], fix["away_id"], fix["away_name"])
-            shown_matches.add(match_key)
-            if (result
-                    and result["p"] >= 65
-                    and result["reliability"] != "🔴 Low — treat with caution"):
-                found = (fix, result)
-                break
-            time.sleep(0.2)
-
-        if not found:
-            await wait.edit_text(
-                "❌ No match found with 65%+ BTTS confidence today.\n\n"
-                "➡️ Try /auto again or use /analyze."
+        uid = int(context.args[0])
+        add_vip(uid, days=7)
+        await update.message.reply_text(f"✅ {uid} kullanıcısına 7 günlük VİP eklendi.")
+        try:
+            await context.bot.send_message(
+                chat_id=uid,
+                text=(
+                    "🎉 VİP üyeliğiniz aktifleştirildi!\n\n"
+                    "7 gün boyunca tüm analizlere erişebilirsiniz.\n\n"
+                    "⚽ /analiz — Maç analizi\n"
+                    "🤖 /otomatik — Otomatik maç\n\n"
+                    "İyi analizler! 🍀"
+                )
             )
-            return
+        except:
+            pass
+    except ValueError:
+        await update.message.reply_text("❌ Geçersiz user ID.")
 
-        fix, result = found
-        await wait.edit_text(format_match_result(result, fix, "🤖 AUTO PICK", "/auto"))
-
-    except Exception as e:
-        await wait.edit_text(f"❌ Error: {e}")
-
-
-async def date_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def toplamvip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔️ Access Denied.")
-        return ConversationHandler.END
-    await update.message.reply_text(
-        "📅 Which date's bulletin do you want to analyze?\n\n"
-        "Examples:\n"
-        "• March 10\n"
-        "• March 10 2026\n"
-        "• Tomorrow\n"
-        "• Tuesday\n"
-        "• 10.03.2026"
-    )
-    return DATE_INPUT
+        await update.message.reply_text("⛔️ Sadece admin kullanabilir.")
+        return
+    vips = get_all_vips()
+    if not vips:
+        await update.message.reply_text("📋 Henüz VİP üye yok.")
+        return
+    lines = ["👑 TÜM VİP ÜYELER\n━━━━━━━━━━━━━━━━━━━━\n"]
+    for uid, exp, kalan, durum in vips:
+        exp_str = datetime.fromisoformat(exp).strftime("%d.%m.%Y %H:%M")
+        lines.append(f"🆔 {uid}\n{durum}\n📅 Bitiş: {exp_str}\n⏳ Kalan: {kalan} gün\n")
+    await update.message.reply_text("\n".join(lines))
 
-
-async def date_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return ConversationHandler.END
-
-    target_date, date_label = parse_date_input(update.message.text)
-
-    if not target_date:
-        await update.message.reply_text(
-            "❌ Date not understood.\n\n"
-            "Please use one of these formats:\n"
-            "• March 10\n"
-            "• Tomorrow\n"
-            "• Tuesday\n"
-            "• 10.03.2026"
-        )
-        return DATE_INPUT
-
-    wait = await update.message.reply_text(
-        f"🛜 Scanning bulletin for {date_label}... This may take a minute."
-    )
-
-    try:
-        fixtures = get_fixtures_for_date(target_date)
-        if not fixtures:
-            await wait.edit_text(f"❌ No matches found in the bulletin for {date_label}.")
-            return ConversationHandler.END
-
-        date_shown_key = f"date_{target_date}"
-        if date_shown_key not in context.user_data:
-            context.user_data[date_shown_key] = set()
-
-        seen_for_date = context.user_data[date_shown_key]
-        unseen = [f for f in fixtures if f"{f['home_id']}_{f['away_id']}" not in seen_for_date]
-
-        if not unseen:
-            seen_for_date.clear()
-            unseen = fixtures
-
-        random.shuffle(unseen)
-
-        found = None
-        for fix in unseen:
-            match_key = f"{fix['home_id']}_{fix['away_id']}"
-            result = analyze_teams(fix["home_id"], fix["home_name"], fix["away_id"], fix["away_name"])
-            seen_for_date.add(match_key)
-            if (result
-                    and result["p"] >= 65
-                    and result["reliability"] != "🔴 Low — treat with caution"):
-                found = (fix, result)
-                break
-            time.sleep(0.2)
-
-        context.user_data[date_shown_key] = seen_for_date
-
-        if not found:
-            await wait.edit_text(
-                f"❌ No match found with 65%+ BTTS confidence for {date_label}.\n\n"
-                "➡️ Use /date to try another date."
-            )
-            return ConversationHandler.END
-
-        fix, result = found
-        await wait.edit_text(
-            format_match_result(result, fix, f"📅 {date_label} BULLETIN", "/date")
-        )
-
-    except Exception as e:
-        await wait.edit_text(f"❌ Error: {e}")
-
-    return ConversationHandler.END
-
-
-async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def analiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global bot_active
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔️ Access Denied.")
+    uid = update.effective_user.id
+    if not is_vip(uid):
+        await update.message.reply_text(VIP_REQUIRED_MSG)
         return ConversationHandler.END
     bot_active = True
     context.user_data.clear()
-    await update.message.reply_text("🏳 Home Team Name:")
+    await update.message.reply_text("🏳 Ev Sahibi Takım Adı:")
     return HOME_NAME
-
 
 async def get_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_active:
-        await update.message.reply_text("🔴 Bot is paused. Use /analyze to resume.")
+        await update.message.reply_text("🔴 Bot durduruldu. /analiz ile yeniden başlat.")
         return ConversationHandler.END
     context.user_data["t1"] = update.message.text
-    await update.message.reply_text("🚩 Away Team Name:")
+    await update.message.reply_text("🚩 Deplasman Takım Adı:")
     return AWAY_NAME
-
 
 async def get_away(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_active:
-        await update.message.reply_text("🔴 Bot is paused. Use /analyze to resume.")
+        await update.message.reply_text("🔴 Bot durduruldu.")
+        return ConversationHandler.END
+    if not is_vip(update.effective_user.id):
+        await update.message.reply_text(VIP_REQUIRED_MSG)
         return ConversationHandler.END
 
     t1 = context.user_data.get("t1", "")
     t2 = update.message.text
+    wait = await update.message.reply_text("⏳ Analiz yapılıyor...")
 
-    wait = await update.message.reply_text("🛜 Analyzing...")
-    result = get_match_analysis(t1, t2)
+    id1, name1 = search_team_id(t1)
+    id2, name2 = search_team_id(t2)
 
-    if "error" in result:
-        await wait.edit_text(f"❌ {result['error']}\n\n➡️ /analyze to try again.")
+    if not id1:
+        await wait.edit_text(f"❌ Takım bulunamadı: '{t1}'\n\n➡️ /analiz ile tekrar dene.")
+        return ConversationHandler.END
+    if not id2:
+        await wait.edit_text(f"❌ Takım bulunamadı: '{t2}'\n\n➡️ /analiz ile tekrar dene.")
+        return ConversationHandler.END
+
+    result = analyze_teams(id1, name1, id2, name2)
+    if not result:
+        await wait.edit_text("❌ Maç verisi bulunamadı.\n\n➡️ /analiz ile tekrar dene.")
         return ConversationHandler.END
 
     await wait.delete()
-
-    prob   = result["p"]
-    icon   = "✅" if prob >= 50 else "⛔️"
-    status = "BTTS YES" if prob >= 50 else "BTTS NO"
-
-    if result["h2h_note"] == "old":
-        h2h_line = "🕐 H2H: Only old data (3+ years) — not used\n"
-    elif result["h2h_note"] == "none":
-        h2h_line = "🕐 H2H: No data\n"
-    else:
-        h2h_line = f"🤝 H2H (last 3y): {result['h2h_note']} BTTS\n"
-
-    warning_lines = ""
-    if result.get("warnings"):
-        warning_lines = "\n" + "\n".join(result["warnings"]) + "\n"
-
-    report = (
-        "📊 MATCH ANALYSIS\n\n"
-        f"🏳 {result['h']}\n"
-        f"🚩 {result['a']}\n\n"
-        f"⚽ xG Home: {result['lh']}  |  Away: {result['la']}\n"
-        f"⚽ xG Weighted: {result['lh_w']}  |  {result['la_w']}\n\n"
-        f"📈 BTTS Probability: {result['p_yes']}%\n"
-        f"📐 BTTS Weighted:    {result['p_yes_w']}%\n"
-        f"🎲 Monte Carlo:      {result['mc']}% ({result['mc_low']}-{result['mc_high']}%)\n\n"
-        f"⚽ Last 5 BTTS:  🏳 {result['home_btts_5']}  |  🚩 {result['away_btts_5']}\n"
-        f"⚽ Last 10 BTTS: 🏳 {result['home_btts_10']}  |  🚩 {result['away_btts_10']}\n"
-        f"{h2h_line}"
-        f"{warning_lines}\n"
-        f"📶 Reliability: {result['reliability']}\n\n"
-        f"{icon} {status}\n"
-        f"🎯 Final: {prob}%\n\n"
-        "➡️ /analyze for new analysis\n"
-        "🔴 /stop to pause the bot"
-    )
-
-    await update.message.reply_text(report)
+    await update.message.reply_text(format_analysis(result))
     return ConversationHandler.END
 
+async def otomatik_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_vip(update.effective_user.id):
+        await update.message.reply_text(VIP_REQUIRED_MSG)
+        return
+
+    wait = await update.message.reply_text("🛜 Bugünün bülteni taranıyor...")
+    try:
+        fix, result = find_auto_pick(threshold=65)
+        if not fix or not result:
+            await wait.edit_text(
+                "❌ Bugün %65+ güven ile maç bulunamadı.\n\n"
+                "➡️ /otomatik ile tekrar dene."
+            )
+            return
+
+        try:
+            ko = datetime.fromisoformat(fix["kickoff"].replace("Z", "+00:00"))
+            ko_str = ko.strftime("%H:%M")
+        except:
+            ko_str = "?"
+
+        header = (
+            f"🤖 OTOMATİK SEÇİM\n\n"
+            f"🏆 {fix['league']}\n"
+            f"⏰ {ko_str}\n\n"
+        )
+        await wait.edit_text(header + format_analysis(result) + "\n\n➡️ /otomatik ile yeni maç")
+    except Exception as e:
+        await wait.edit_text(f"❌ Hata: {e}")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text("❌ Cancelled.")
+    await update.message.reply_text("❌ İptal edildi.")
     return ConversationHandler.END
 
+async def unknown_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_vip(update.effective_user.id):
+        await update.message.reply_text(
+            "🚫 Merhaba!\n\n"
+            "VİP Üye Olmadığınız için İşlem Yapılmıyor.\n"
+            "Lütfen VİP Alın.\n\n"
+            "📊 Günlük +400 Maç Analizi\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "💎 VİP: 7 Günlük 800₺\n"
+            "📩 İletişim: @blutad\n"
+            "━━━━━━━━━━━━━━━━━━━━"
+        )
 
 async def post_init(app):
-    asyncio.create_task(send_daily_combine(app))
-
+    asyncio.create_task(check_vip_expiry(app))
 
 def run_bot():
     while True:
         try:
             app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
-            analyze_conv = ConversationHandler(
-                entry_points=[CommandHandler("analyze", analyze_cmd)],
+            analiz_conv = ConversationHandler(
+                entry_points=[CommandHandler("analiz", analiz_cmd)],
                 states={
                     HOME_NAME: [
-                        CommandHandler("analyze", analyze_cmd),
-                        CommandHandler("stop", stop_cmd),
+                        CommandHandler("analiz", analiz_cmd),
+                        CommandHandler("dur", dur_cmd),
                         MessageHandler(filters.TEXT & ~filters.COMMAND, get_home),
                     ],
                     AWAY_NAME: [
-                        CommandHandler("analyze", analyze_cmd),
-                        CommandHandler("stop", stop_cmd),
+                        CommandHandler("analiz", analiz_cmd),
+                        CommandHandler("dur", dur_cmd),
                         MessageHandler(filters.TEXT & ~filters.COMMAND, get_away),
                     ],
                 },
                 fallbacks=[
                     CommandHandler("cancel", cancel),
-                    CommandHandler("analyze", analyze_cmd),
-                    CommandHandler("stop", stop_cmd),
-                ],
-                allow_reentry=True,
-            )
-
-            date_conv = ConversationHandler(
-                entry_points=[CommandHandler("date", date_cmd)],
-                states={
-                    DATE_INPUT: [
-                        CommandHandler("date", date_cmd),
-                        CommandHandler("cancel", cancel),
-                        MessageHandler(filters.TEXT & ~filters.COMMAND, date_input),
-                    ],
-                },
-                fallbacks=[
-                    CommandHandler("cancel", cancel),
-                    CommandHandler("date", date_cmd),
+                    CommandHandler("analiz", analiz_cmd),
+                    CommandHandler("dur", dur_cmd),
                 ],
                 allow_reentry=True,
             )
 
             app.add_handler(CommandHandler("start", start))
-            app.add_handler(CommandHandler("stop", stop_cmd))
-            app.add_handler(CommandHandler("combine", combine_cmd))
-            app.add_handler(CommandHandler("auto", auto_cmd))
-            app.add_handler(analyze_conv)
-            app.add_handler(date_conv)
+            app.add_handler(CommandHandler("dur", dur_cmd))
+            app.add_handler(CommandHandler("otomatik", otomatik_cmd))
+            app.add_handler(CommandHandler("vipekle", vipekle_cmd))
+            app.add_handler(CommandHandler("toplamvip", toplamvip_cmd))
+            app.add_handler(analiz_conv)
+            app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown_user))
 
-            print("BOT RUNNING")
+            print("BOT ÇALIŞIYOR")
             app.run_polling(drop_pending_updates=True)
-
         except Exception as e:
-            print("BOT RESTARTING:", e)
+            print("BOT YENİDEN BAŞLATILIYOR:", e)
             time.sleep(5)
-
 
 run_bot()
